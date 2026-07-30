@@ -1,39 +1,40 @@
 // src/api.js
 
-// ---- Species configuration ----
-
 export const SPECIES = [
   {
     id: "purple",
     scientificName: "Strongylocentrotus purpuratus",
     commonName: "Purple Sea Urchin",
     regionHint: "US West Coast",
+    rangeLabel: "California to British Columbia",
+    story:
+      "Dense purple urchin barrens can block kelp recovery after marine heat waves and predator loss.",
   },
   {
     id: "longspined",
     scientificName: "Centrostephanus rodgersii",
     commonName: "Long-spined Sea Urchin",
     regionHint: "Australia / Tasmania",
+    rangeLabel: "New South Wales to Tasmania",
+    story:
+      "A warming-driven range expansion is pushing long-spined urchins into Tasmanian kelp ecosystems.",
   },
   {
     id: "green",
     scientificName: "Strongylocentrotus droebachiensis",
     commonName: "Green Sea Urchin",
     regionHint: "North Atlantic",
+    rangeLabel: "Maine, Canada, Greenland, Norway",
+    story:
+      "Green urchin outbreaks can maintain bare seafloor where kelp forests previously stored carbon and habitat.",
   },
 ];
 
-// Base GBIF endpoint
 const GBIF_BASE_URL = "https://api.gbif.org/v1/occurrence/search";
-
-// Use a public CORS proxy so the browser can talk to GBIF
-const CORS_PROXY = "https://corsproxy.io/?";
-
 const YEARS_BACK = 5;
-const PAGE_LIMIT = 300;        // GBIF max per page is 300
-const MAX_PER_SPECIES = 2000;  // Safety cap so we don't overload the browser
-
-// ---- Helpers ----
+const PAGE_LIMIT = 300;
+const MAX_PER_SPECIES = 1800;
+const REQUEST_TIMEOUT_MS = 12000;
 
 function buildGbifUrl(scientificName, offset = 0) {
   const currentYear = new Date().getFullYear();
@@ -42,7 +43,7 @@ function buildGbifUrl(scientificName, offset = 0) {
   const params = new URLSearchParams({
     scientificName,
     hasCoordinate: "true",
-    year: `${startYear},${currentYear}`, // last N years
+    year: `${startYear},${currentYear}`,
     limit: PAGE_LIMIT.toString(),
     offset: offset.toString(),
   });
@@ -50,7 +51,48 @@ function buildGbifUrl(scientificName, offset = 0) {
   return `${GBIF_BASE_URL}?${params.toString()}`;
 }
 
-// Fetch a single species’ occurrences from GBIF
+async function fetchJsonWithTimeout(url) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`GBIF returned ${response.status}`);
+    }
+
+    return await response.json();
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function cleanOccurrence(record) {
+  if (
+    typeof record.decimalLatitude !== "number" ||
+    typeof record.decimalLongitude !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    key: record.key,
+    lat: record.decimalLatitude,
+    lng: record.decimalLongitude,
+    year: record.year,
+    country: record.country,
+    stateProvince: record.stateProvince,
+    locality: record.locality,
+    basisOfRecord: record.basisOfRecord,
+  };
+}
+
 export async function fetchOccurrencesForSpecies(
   scientificName,
   maxRecords = MAX_PER_SPECIES
@@ -60,56 +102,52 @@ export async function fetchOccurrencesForSpecies(
 
   while (all.length < maxRecords) {
     const url = buildGbifUrl(scientificName, offset);
-    const proxiedUrl = CORS_PROXY + encodeURIComponent(url);
-
-    const res = await fetch(proxiedUrl);
-
-    if (!res.ok) {
-      throw new Error(`GBIF request failed (${res.status}): ${res.statusText}`);
-    }
-
-    const data = await res.json();
+    const data = await fetchJsonWithTimeout(url);
     const pageResults = Array.isArray(data.results) ? data.results : [];
 
-    const cleaned = pageResults
-      .filter(
-        (r) =>
-          typeof r.decimalLatitude === "number" &&
-          typeof r.decimalLongitude === "number"
-      )
-      .map((r) => ({
-        key: r.key,
-        lat: r.decimalLatitude,
-        lng: r.decimalLongitude,
-        year: r.year,
-        country: r.country,
-        stateProvince: r.stateProvince,
-      }));
-
+    const cleaned = pageResults.map(cleanOccurrence).filter(Boolean);
     all = all.concat(cleaned);
 
-    if (data.endOfRecords || pageResults.length === 0) break;
+    if (data.endOfRecords || pageResults.length === 0) {
+      break;
+    }
+
     offset += PAGE_LIMIT;
   }
 
   return all.slice(0, maxRecords);
 }
 
-// Fetch all configured species in parallel
 export async function fetchAllSpeciesOccurrences() {
-  const entries = await Promise.all(
-    SPECIES.map(async (s) => {
-      const occurrences = await fetchOccurrencesForSpecies(s.scientificName);
-      return [s.id, occurrences];
+  const settled = await Promise.allSettled(
+    SPECIES.map(async (species) => {
+      const occurrences = await fetchOccurrencesForSpecies(species.scientificName);
+      return [species.id, occurrences];
     })
   );
 
-  return Object.fromEntries(entries);
+  const data = {};
+  const failures = [];
+
+  settled.forEach((result, index) => {
+    const species = SPECIES[index];
+
+    if (result.status === "fulfilled") {
+      const [id, occurrences] = result.value;
+      data[id] = occurrences;
+    } else {
+      data[species.id] = [];
+      failures.push({
+        speciesId: species.id,
+        commonName: species.commonName,
+        message: result.reason?.message || "Unknown GBIF error",
+      });
+    }
+  });
+
+  return { data, failures };
 }
 
-// ---- Invasiveness / grid aggregation ----
-
-// Group occurrences into lat/lng grid cells and classify risk by count
 export function computeGridCells(
   occurrences,
   cellSizeDeg = 1,
@@ -118,9 +156,9 @@ export function computeGridCells(
   const { high, medium } = thresholds;
   const grid = new Map();
 
-  occurrences.forEach((o) => {
-    const latIdx = Math.floor(o.lat / cellSizeDeg);
-    const lngIdx = Math.floor(o.lng / cellSizeDeg);
+  occurrences.forEach((occurrence) => {
+    const latIdx = Math.floor(occurrence.lat / cellSizeDeg);
+    const lngIdx = Math.floor(occurrence.lng / cellSizeDeg);
     const key = `${latIdx}_${lngIdx}`;
 
     const cell = grid.get(key) || {
@@ -131,7 +169,10 @@ export function computeGridCells(
     };
 
     cell.count += 1;
-    cell.samples.push(o);
+    if (cell.samples.length < 4) {
+      cell.samples.push(occurrence);
+    }
+
     grid.set(key, cell);
   });
 
@@ -142,6 +183,7 @@ export function computeGridCells(
 
   for (const [id, cell] of grid.entries()) {
     let risk = "Low";
+
     if (cell.count >= high) {
       risk = "High";
       highCount += 1;
@@ -152,18 +194,17 @@ export function computeGridCells(
       lowCount += 1;
     }
 
-    const latCenter = (cell.latIdx + 0.5) * cellSizeDeg;
-    const lngCenter = (cell.lngIdx + 0.5) * cellSizeDeg;
-
     cells.push({
       id,
-      lat: latCenter,
-      lng: lngCenter,
+      lat: (cell.latIdx + 0.5) * cellSizeDeg,
+      lng: (cell.lngIdx + 0.5) * cellSizeDeg,
       count: cell.count,
       risk,
       samples: cell.samples,
     });
   }
+
+  cells.sort((a, b) => b.count - a.count);
 
   return {
     cells,
@@ -174,5 +215,46 @@ export function computeGridCells(
       medCount,
       lowCount,
     },
+  };
+}
+
+export function computeYearlyEvidence(
+  occurrences,
+  cellSizeDeg = 1,
+  thresholds = { high: 30, medium: 10 }
+) {
+  const currentYear = new Date().getFullYear();
+  const years = [currentYear - 2, currentYear - 1, currentYear];
+
+  const byYear = years.map((year) => {
+    const records = occurrences.filter((occurrence) => occurrence.year === year);
+    const grid = computeGridCells(records, cellSizeDeg, thresholds);
+
+    return {
+      year,
+      label: year === currentYear ? `${year} YTD` : String(year),
+      records: records.length,
+      cells: grid.summary.cellCount,
+      highRiskCells: grid.summary.highCount,
+    };
+  });
+
+  const previous = byYear[0];
+  const latestComplete = byYear[1];
+  const current = byYear[2];
+  const recordDelta = latestComplete.records - previous.records;
+  const highRiskDelta = latestComplete.highRiskCells - previous.highRiskCells;
+
+  return {
+    years: byYear,
+    previous,
+    latestComplete,
+    current,
+    recordDelta,
+    highRiskDelta,
+    recordDeltaPercent:
+      previous.records > 0
+        ? Math.round((recordDelta / previous.records) * 100)
+        : null,
   };
 }

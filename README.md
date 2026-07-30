@@ -1,16 +1,42 @@
-# React + Vite
+# Invasive Sea Urchin Tracker
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A student-built biodiversity dashboard that maps recent sea urchin occurrence
+records from GBIF and turns them into a simple risk view for kelp-forest
+restoration conversations.
 
-Currently, two official plugins are available:
+## What It Does
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- Fetches coordinate-backed GBIF records from the last five years.
+- Tracks purple, long-spined, and green sea urchins.
+- Groups records into 1-degree map cells.
+- Flags cells as low, medium, or high density.
+- Shows hotspot summaries, selected-cell examples, and harvest notes.
+- Compares the last two complete years and shows the current year to date, so
+  the project can demonstrate evidence growth over a one-year period.
 
-## React Compiler
+This is a public-data prototype, not an official monitoring system. GBIF records
+can include sampling bias, duplicate survey effort, and uneven regional coverage.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Run Locally
 
-## Expanding the ESLint configuration
+```bash
+npm install
+npm run dev
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Checks
+
+```bash
+npm run lint
+npm run build
+npm audit
+```
+
+## Data Source
+
+Occurrence data comes from the GBIF occurrence search API:
+
+https://api.gbif.org/v1/occurrence/search
+
+The app calls GBIF directly from the browser. Older versions routed traffic
+through a public CORS proxy, which is no longer reliable.

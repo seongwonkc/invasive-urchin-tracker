@@ -1,69 +1,58 @@
-// src/MapComponent.jsx
-import React from "react";
 import {
+  CircleMarker,
   MapContainer,
   TileLayer,
-  CircleMarker,
   Tooltip,
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
+function markerColor(risk) {
+  if (risk === "High") return "#fb923c";
+  if (risk === "Medium") return "#34d399";
+  return "#67e8f9";
+}
+
 const MapComponent = ({ gridData, selectedSpecies, onCellClick }) => {
   const cells = gridData?.cells || [];
-
-  const points = cells.map((cell) => ({
-    id: cell.id,
-    lat: cell.lat,
-    lng: cell.lng,
-    intensity: cell.count,
-    risk: cell.risk,
-  }));
-
-  const maxIntensity =
-    points.length > 0 ? Math.max(...points.map((p) => p.intensity)) : 1;
+  const maxCount = cells.length
+    ? Math.max(...cells.map((cell) => cell.count))
+    : 1;
 
   return (
-    <div className="h-full w-full">
+    <div className="h-full min-h-[520px] w-full border border-stone-800 bg-stone-950">
       <MapContainer
-        center={[20, 0]}
+        center={[18, 0]}
         zoom={2}
-        className="h-full w-full rounded-2xl overflow-hidden border border-slate-700 bg-slate-900/70"
         minZoom={2}
+        maxZoom={9}
+        className="h-full min-h-[520px] w-full bg-stone-950"
+        worldCopyJump
       >
         <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          attribution="&copy; OpenStreetMap contributors"
         />
 
-        {/* “Poor-man’s heatmap”: circles sized & colored by intensity */}
-        {points.map((p) => {
-          const normalized = p.intensity / maxIntensity;
-
-          const color =
-            p.risk === "High"
-              ? "#f97316" // orange
-              : p.risk === "Medium"
-              ? "#22c55e" // green
-              : "#38bdf8"; // blue
-
-          const radius = 3 + normalized * 9;
-          const fillOpacity = 0.25 + normalized * 0.6;
+        {cells.map((cell) => {
+          const normalized = cell.count / maxCount;
+          const color = markerColor(cell.risk);
+          const radius = 4 + normalized * 12;
 
           return (
             <CircleMarker
-              key={p.id}
-              center={[p.lat, p.lng]}
+              key={cell.id}
+              center={[cell.lat, cell.lng]}
               radius={radius}
               pathOptions={{
                 color,
                 fillColor: color,
-                fillOpacity,
-                weight: 0.5,
+                fillOpacity: 0.25 + normalized * 0.55,
+                opacity: 0.9,
+                weight: 1,
               }}
               eventHandlers={{
                 click: () => {
-                  const cell = cells.find((c) => c.id === p.id);
-                  if (onCellClick && cell) onCellClick(cell);
+                  onCellClick?.(cell);
                 },
               }}
             >
@@ -72,8 +61,11 @@ const MapComponent = ({ gridData, selectedSpecies, onCellClick }) => {
                   <div className="font-semibold">
                     {selectedSpecies?.commonName}
                   </div>
-                  <div>Reports: {p.intensity}</div>
-                  <div>Risk: {p.risk}</div>
+                  <div>Reports: {cell.count}</div>
+                  <div>Risk: {cell.risk}</div>
+                  <div>
+                    Cell: {cell.lat.toFixed(1)}, {cell.lng.toFixed(1)}
+                  </div>
                 </div>
               </Tooltip>
             </CircleMarker>
@@ -81,13 +73,13 @@ const MapComponent = ({ gridData, selectedSpecies, onCellClick }) => {
         })}
       </MapContainer>
 
-      {points.length === 0 && (
-        <div className="mt-2 text-xs text-slate-400">
-          No recent GBIF reports found for{" "}
-          <span className="font-semibold">
+      {cells.length === 0 && (
+        <div className="border-t border-stone-800 px-4 py-3 text-xs text-stone-400">
+          No recent coordinate-backed GBIF records found for{" "}
+          <span className="font-semibold text-stone-200">
             {selectedSpecies?.scientificName}
-          </span>{" "}
-          in the last 5 years.
+          </span>
+          .
         </div>
       )}
     </div>

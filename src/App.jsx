@@ -1,70 +1,58 @@
-// src/App.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  ResponsiveContainer,
-  BarChart,
   Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
   XAxis,
   YAxis,
-  Tooltip as RechartsTooltip,
-  Legend,
 } from "recharts";
 
 import MapComponent from "./MapComponent";
 import {
   SPECIES,
-  fetchAllSpeciesOccurrences,
   computeGridCells,
+  computeYearlyEvidence,
+  fetchAllSpeciesOccurrences,
 } from "./api";
 
-// Hard-coded culinary profiles for the “Eat It” panel
+const INVASIVENESS_THRESHOLDS = {
+  high: 30,
+  medium: 10,
+};
+
 const CULINARY_PROFILES = {
   purple: {
     uniGrade: "Premium",
     flavor: "Sweet, buttery, clean brine",
-    texture: "Custardy, melts on the tongue",
-    notes:
-      "Infamous kelp-forest bulldozer along the US West Coast. Harvest pressure here is basically habitat restoration with chopsticks.",
-    suggestedDishes: [
-      "Uni-topped scallop crudo",
-      "Creamy uni pasta with lemon zest",
-      "Uni over rice with shiso and pickled ginger",
-    ],
-    sustainabilityTip:
-      "Partner with local dive programs and kelp-restoration projects to prioritize harvest in high-risk barrens.",
+    texture: "Custardy",
+    harvestUse:
+      "Targeted harvest can help reduce grazing pressure in established urchin barrens.",
+    dishes: ["Uni toast", "Uni pasta", "Scallop crudo"],
   },
   longspined: {
-    uniGrade: "High (if handled quickly)",
-    flavor: "Rich, slightly metallic, strong ocean umami",
-    texture: "Firm lobes, creamy when very fresh",
-    notes:
-      "Expanding from mainland Australia down into Tasmania, chewing through kelp like it’s a salad bar with no closing time.",
-    suggestedDishes: [
-      "Charcoal-grilled sourdough with long-spined uni butter",
-      "Uni folded into miso beurre blanc over white fish",
-      "Tasmanian uni chawanmushi (savory custard)",
-    ],
-    sustainabilityTip:
-      "Focus harvest on urchin barrens where kelp canopy has already collapsed; coordinate with local fisheries managers.",
+    uniGrade: "High if handled quickly",
+    flavor: "Rich ocean umami",
+    texture: "Firm, creamy when fresh",
+    harvestUse:
+      "Removal is most useful where barrens are expanding into remnant kelp habitat.",
+    dishes: ["Uni butter", "Miso beurre blanc", "Chawanmushi"],
   },
   green: {
-    uniGrade: "Variable but often good",
-    flavor: "Briny, slightly nutty, classic North Atlantic profile",
-    texture: "Delicate lobes, can be grainier if older",
-    notes:
-      "Overgrazing kelp beds in parts of the North Atlantic and Arctic-ish coasts. Also: surprisingly delicious when someone else cracks the shell for you.",
-    suggestedDishes: [
-      "Green urchin butter baked over oysters",
-      "Potato–leek soup finished with a spoon of uni",
-      "Nordic-style uni toast with dill and lemon",
-    ],
-    sustainabilityTip:
-      "Work with small-scale fisheries and chefs to build stable demand so divers can justify targeted removals.",
+    uniGrade: "Variable",
+    flavor: "Briny, slightly nutty",
+    texture: "Delicate",
+    harvestUse:
+      "Stable restaurant demand can make targeted removals more economically realistic.",
+    dishes: ["Uni oysters", "Potato leek soup", "Nordic uni toast"],
   },
 };
 
 function riskSummaryToChart(summary) {
   if (!summary) return [];
+
   return [
     { name: "High", value: summary.highCount },
     { name: "Medium", value: summary.medCount },
@@ -72,36 +60,62 @@ function riskSummaryToChart(summary) {
   ];
 }
 
-const INVASIVENESS_THRESHOLDS = {
-  high: 30, // “High Risk” cell if >= 30 reports in last 5 years
-  medium: 10,
-};
+function formatNumber(value) {
+  return new Intl.NumberFormat("en-US").format(value || 0);
+}
+
+function sampleLocation(sample) {
+  return [sample.locality, sample.stateProvince, sample.country, sample.year]
+    .filter(Boolean)
+    .join(" / ");
+}
 
 function App() {
   const [speciesData, setSpeciesData] = useState({});
+  const [failures, setFailures] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedSpeciesId, setSelectedSpeciesId] = useState("purple");
-  const [error, setError] = useState(null);
   const [selectedCell, setSelectedCell] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
 
     async function load() {
+      setLoading(true);
+      setFailures([]);
+
       try {
-        setLoading(true);
-        const data = await fetchAllSpeciesOccurrences();
+        const result = await fetchAllSpeciesOccurrences();
+
         if (!isMounted) return;
-        setSpeciesData(data);
-      } catch (e) {
-        console.error(e);
-        if (isMounted) {
-          setError(
-            "Failed to fetch GBIF data. Check your network connection or CORS settings."
+
+        setSpeciesData(result.data);
+        setFailures(result.failures);
+
+        const firstSpeciesWithData = SPECIES.find(
+          (species) => result.data[species.id]?.length
+        );
+
+        if (firstSpeciesWithData) {
+          setSelectedSpeciesId((current) =>
+            result.data[current]?.length ? current : firstSpeciesWithData.id
           );
         }
+      } catch (error) {
+        if (isMounted) {
+          setSpeciesData({});
+          setFailures([
+            {
+              speciesId: "all",
+              commonName: "GBIF",
+              message: error.message || "Could not load occurrence data",
+            },
+          ]);
+        }
       } finally {
-        if (isMounted) setLoading(false);
+        if (isMounted) {
+          setLoading(false);
+        }
       }
     }
 
@@ -112,117 +126,154 @@ function App() {
     };
   }, []);
 
-  const selectedSpecies = SPECIES.find((s) => s.id === selectedSpeciesId);
+  const selectedSpecies =
+    SPECIES.find((species) => species.id === selectedSpeciesId) || SPECIES[0];
 
-  const gridData = useMemo(() => {
-    const occurrences = speciesData[selectedSpeciesId] || [];
-    return computeGridCells(occurrences, 1, INVASIVENESS_THRESHOLDS);
-  }, [speciesData, selectedSpeciesId]);
+  const gridData = useMemo(
+    () =>
+      computeGridCells(
+        speciesData[selectedSpeciesId] || [],
+        1,
+        INVASIVENESS_THRESHOLDS
+      ),
+    [speciesData, selectedSpeciesId]
+  );
 
   const riskChartData = useMemo(
-    () => riskSummaryToChart(gridData?.summary),
-    [gridData]
+    () => riskSummaryToChart(gridData.summary),
+    [gridData.summary]
+  );
+  const yearlyEvidence = useMemo(
+    () =>
+      computeYearlyEvidence(
+        speciesData[selectedSpeciesId] || [],
+        1,
+        INVASIVENESS_THRESHOLDS
+      ),
+    [speciesData, selectedSpeciesId]
   );
 
   const culinaryProfile = CULINARY_PROFILES[selectedSpeciesId];
-
+  const topCells = gridData.cells.slice(0, 5);
+  const allRecords = SPECIES.reduce(
+    (sum, species) => sum + (speciesData[species.id]?.length || 0),
+    0
+  );
   const highRiskPercent =
-    gridData && gridData.summary.cellCount > 0
-      ? (
-          (gridData.summary.highCount / gridData.summary.cellCount) *
-          100
-        ).toFixed(1)
-      : "0.0";
+    gridData.summary.cellCount > 0
+      ? Math.round((gridData.summary.highCount / gridData.summary.cellCount) * 100)
+      : 0;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      {/* Top nav / title */}
-      <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur">
-        <div className="mx-auto max-w-7xl px-4 py-4 flex items-center justify-between gap-4">
+    <div className="min-h-screen bg-neutral-950 text-stone-100">
+      <header className="border-b border-stone-800 bg-neutral-950/95">
+        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-5 md:flex-row md:items-end md:justify-between">
           <div>
-            <h1 className="text-xl md:text-2xl font-semibold tracking-tight">
+            <p className="text-xs font-semibold uppercase tracking-widest text-cyan-300">
+              Student biodiversity prototype
+            </p>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-white md:text-3xl">
               Invasive Sea Urchin Tracker
             </h1>
-            <p className="text-xs md:text-sm text-slate-400">
-              Real-time biodiversity data + invasiveness scoring + culinary
-              countermeasures.
+            <p className="mt-1 max-w-2xl text-sm text-stone-400">
+              Live GBIF occurrence records, density scoring, and harvest-minded
+              restoration notes for problem urchin populations.
             </p>
           </div>
-          <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            GBIF live data
+          <div className="flex items-center gap-2 text-xs text-stone-400">
+            <span
+              className={`h-2.5 w-2.5 rounded-full ${
+                loading
+                  ? "animate-pulse bg-amber-300"
+                  : failures.length
+                  ? "bg-amber-400"
+                  : "bg-emerald-400"
+              }`}
+            />
+            {loading
+              ? "Loading GBIF"
+              : failures.length
+              ? "GBIF partial data"
+              : "GBIF live"}
           </div>
         </div>
       </header>
 
-      {/* Main layout */}
-      <main className="flex-1 mx-auto max-w-7xl px-4 py-4 md:py-6 grid gap-4 md:gap-6 md:grid-cols-[minmax(0,2fr)_minmax(0,1.3fr)]">
-        {/* Left: Map + species controls */}
-        <section className="flex flex-col gap-3 md:gap-4">
-          {/* Species selector + stats */}
-          <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-3 md:p-4 shadow-lg shadow-slate-950/40">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+      <main className="mx-auto grid max-w-7xl gap-4 px-4 py-4 md:grid-cols-[minmax(0,2fr)_minmax(340px,1fr)] md:gap-5 md:py-6">
+        <section className="flex min-h-[720px] flex-col gap-4">
+          <div className="border border-stone-800 bg-stone-950 p-4">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
               <div>
-                <h2 className="text-sm font-semibold text-slate-100">
-                  Species focus
+                <h2 className="text-sm font-semibold text-stone-100">
+                  Species Focus
                 </h2>
-                <p className="text-xs text-slate-400">
-                  Choose a urchin to visualize density and invasiveness.
+                <p className="text-xs text-stone-400">
+                  Last five years of coordinate-backed occurrence records.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                {SPECIES.map((s) => (
-                  <button
-                    key={s.id}
-                    onClick={() => {
-                      setSelectedSpeciesId(s.id);
-                      setSelectedCell(null);
-                    }}
-                    className={`px-3 py-1.5 rounded-full text-xs font-medium border transition ${
-                      selectedSpeciesId === s.id
-                        ? "bg-slate-100 text-slate-900 border-slate-100"
-                        : "bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500"
-                    }`}
-                  >
-                    {s.commonName}
-                  </button>
-                ))}
+                {SPECIES.map((species) => {
+                  const count = speciesData[species.id]?.length || 0;
+                  const isSelected = selectedSpeciesId === species.id;
+
+                  return (
+                    <button
+                      key={species.id}
+                      onClick={() => {
+                        setSelectedSpeciesId(species.id);
+                        setSelectedCell(null);
+                      }}
+                      className={`border px-3 py-2 text-left text-xs transition ${
+                        isSelected
+                          ? "border-cyan-300 bg-cyan-300 text-neutral-950"
+                          : "border-stone-700 bg-neutral-950 text-stone-300 hover:border-stone-500"
+                      }`}
+                    >
+                      <span className="block font-semibold">
+                        {species.commonName}
+                      </span>
+                      <span
+                        className={`block ${
+                          isSelected ? "text-neutral-700" : "text-stone-500"
+                        }`}
+                      >
+                        {loading ? "loading" : `${formatNumber(count)} records`}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+            <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
               <MetricCard
-                label="Scientific name"
-                value={selectedSpecies?.scientificName}
+                label="Scientific Name"
+                value={selectedSpecies.scientificName}
+              />
+              <MetricCard label="Hotspot" value={selectedSpecies.regionHint} />
+              <MetricCard
+                label="Records"
+                value={formatNumber(gridData.summary.totalRecords)}
               />
               <MetricCard
-                label="Region hotspot"
-                value={selectedSpecies?.regionHint}
-              />
-              <MetricCard
-                label="Records (last 5y)"
-                value={gridData?.summary.totalRecords ?? 0}
-              />
-              <MetricCard
-                label="High-risk cells"
-                value={`${gridData?.summary.highCount ?? 0} (${highRiskPercent}%)`}
+                label="High-Risk Cells"
+                value={`${gridData.summary.highCount} (${highRiskPercent}%)`}
               />
             </div>
           </div>
 
-          {/* Map */}
-          <div className="flex-1 min-h-[380px] md:min-h-[520px]">
+          {failures.length > 0 && (
+            <div className="border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+              Some GBIF requests failed. Available species are still shown.
+              <span className="ml-2 text-amber-200/80">
+                {failures.map((failure) => failure.commonName).join(", ")}
+              </span>
+            </div>
+          )}
+
+          <div className="min-h-[520px] flex-1">
             {loading ? (
-              <div className="h-full flex items-center justify-center text-slate-400 text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-full border-2 border-t-transparent border-sky-400 animate-spin" />
-                  Fetching GBIF occurrences…
-                </div>
-              </div>
-            ) : error ? (
-              <div className="h-full flex items-center justify-center text-center text-sm text-red-400">
-                {error}
-              </div>
+              <LoadingPanel />
             ) : (
               <MapComponent
                 gridData={gridData}
@@ -233,174 +284,288 @@ function App() {
           </div>
         </section>
 
-        {/* Right: Analytics + Eat It panel */}
-        <section className="flex flex-col gap-3 md:gap-4">
-          {/* Risk distribution chart */}
-          <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-3 md:p-4">
-            <h2 className="text-sm font-semibold mb-1.5">
-              Invasiveness score
-            </h2>
-            <p className="text-xs text-slate-400 mb-3">
-              We flag a grid cell as{" "}
-              <span className="text-orange-400">High Risk</span> when the
-              density of reports in the last 5 years exceeds{" "}
-              <span className="font-semibold">
-                {INVASIVENESS_THRESHOLDS.high}
-              </span>
-              . Medium risk kicks in at{" "}
-              <span className="font-semibold">
-                {INVASIVENESS_THRESHOLDS.medium}
-              </span>
-              .
+        <aside className="flex flex-col gap-4">
+          <Panel title="Risk Distribution">
+            <p className="mb-3 text-xs leading-relaxed text-stone-400">
+              Cell risk is based on report density in a 1-degree grid: high at{" "}
+              {INVASIVENESS_THRESHOLDS.high}+ records, medium at{" "}
+              {INVASIVENESS_THRESHOLDS.medium}+.
             </p>
-
-            <div className="h-40">
+            <div className="h-44">
               <ResponsiveContainer>
                 <BarChart data={riskChartData} margin={{ top: 4, right: 8 }}>
+                  <CartesianGrid stroke="#292524" vertical={false} />
                   <XAxis
                     dataKey="name"
-                    tick={{ fontSize: 11, fill: "#94a3b8" }}
-                    axisLine={{ stroke: "#334155" }}
+                    tick={{ fontSize: 11, fill: "#a8a29e" }}
+                    axisLine={{ stroke: "#44403c" }}
                   />
                   <YAxis
-                    tick={{ fontSize: 11, fill: "#94a3b8" }}
-                    axisLine={{ stroke: "#334155" }}
+                    allowDecimals={false}
+                    tick={{ fontSize: 11, fill: "#a8a29e" }}
+                    axisLine={{ stroke: "#44403c" }}
                   />
                   <RechartsTooltip
+                    cursor={{ fill: "rgba(103, 232, 249, 0.08)" }}
                     contentStyle={{
-                      backgroundColor: "#020617",
-                      border: "1px solid #1e293b",
-                      borderRadius: "0.75rem",
+                      backgroundColor: "#0c0a09",
+                      border: "1px solid #44403c",
+                      borderRadius: 0,
                       fontSize: "12px",
                     }}
                   />
-                  <Legend
-                    wrapperStyle={{
-                      fontSize: "11px",
-                      color: "#cbd5f5",
-                    }}
-                  />
+                  <Legend wrapperStyle={{ fontSize: "11px" }} />
                   <Bar
                     dataKey="value"
-                    name="Cells"
-                    fill="#38bdf8"
-                    radius={[6, 6, 0, 0]}
+                    name="Grid cells"
+                    fill="#67e8f9"
+                    radius={[2, 2, 0, 0]}
                   />
                 </BarChart>
               </ResponsiveContainer>
             </div>
+          </Panel>
 
-            {selectedCell && (
-              <div className="mt-3 border-t border-slate-800 pt-2 text-xs">
+          <Panel title="Selected Cell">
+            {selectedCell ? (
+              <div className="space-y-3 text-sm">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-400">Selected cell</span>
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                      selectedCell.risk === "High"
-                        ? "bg-orange-500/20 text-orange-300 border border-orange-500/40"
-                        : selectedCell.risk === "Medium"
-                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                        : "bg-sky-500/20 text-sky-300 border border-sky-500/40"
-                    }`}
-                  >
-                    {selectedCell.risk} risk
-                  </span>
+                  <span className="text-stone-400">Risk</span>
+                  <RiskPill risk={selectedCell.risk} />
                 </div>
-                <div className="mt-1 text-slate-300">
-                  Reports:{" "}
+                <div className="flex items-center justify-between">
+                  <span className="text-stone-400">Reports</span>
                   <span className="font-semibold">
-                    {selectedCell.count}
+                    {formatNumber(selectedCell.count)}
                   </span>
                 </div>
-                {selectedCell.samples?.length > 0 && (
-                  <div className="mt-1 text-slate-400">
-                    Example record:{" "}
-                    <span className="font-mono text-[11px]">
-                      {selectedCell.samples[0].country || "Unknown country"}{" "}
-                      {selectedCell.samples[0].stateProvince &&
-                        `· ${selectedCell.samples[0].stateProvince}`}{" "}
-                      {selectedCell.samples[0].year &&
-                        `· ${selectedCell.samples[0].year}`}
+                <div>
+                  <div className="mb-1 text-xs uppercase tracking-wider text-stone-500">
+                    Example Records
+                  </div>
+                  <div className="space-y-1 text-xs text-stone-300">
+                    {selectedCell.samples.map((sample) => (
+                      <div key={sample.key || sampleLocation(sample)}>
+                        {sampleLocation(sample) || "Unknown location"}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-stone-400">
+                Select a map marker to inspect records from that grid cell.
+              </p>
+            )}
+          </Panel>
+
+          <Panel title="One-Year Evidence">
+            <p className="mb-3 text-xs leading-relaxed text-stone-400">
+              Comparing the last two complete years gives the project a fair
+              year-over-year signal. The current year is shown separately as
+              season-to-date data.
+            </p>
+            <div className="mb-3 grid grid-cols-2 gap-2">
+              <MetricCard
+                label={`${yearlyEvidence.previous.year} Records`}
+                value={formatNumber(yearlyEvidence.previous.records)}
+              />
+              <MetricCard
+                label={`${yearlyEvidence.latestComplete.year} Records`}
+                value={formatNumber(yearlyEvidence.latestComplete.records)}
+              />
+              <MetricCard
+                label="Record Change"
+                value={
+                  yearlyEvidence.recordDeltaPercent === null
+                    ? "New baseline"
+                    : `${yearlyEvidence.recordDelta >= 0 ? "+" : ""}${formatNumber(
+                        yearlyEvidence.recordDelta
+                      )} (${yearlyEvidence.recordDeltaPercent}%)`
+                }
+              />
+              <MetricCard
+                label={`${yearlyEvidence.current.year} YTD`}
+                value={`${formatNumber(yearlyEvidence.current.records)} records`}
+              />
+            </div>
+            <div className="h-36">
+              <ResponsiveContainer>
+                <BarChart
+                  data={yearlyEvidence.years}
+                  margin={{ top: 4, right: 8, left: 0 }}
+                >
+                  <CartesianGrid stroke="#292524" vertical={false} />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fontSize: 11, fill: "#a8a29e" }}
+                    axisLine={{ stroke: "#44403c" }}
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    tick={{ fontSize: 11, fill: "#a8a29e" }}
+                    axisLine={{ stroke: "#44403c" }}
+                  />
+                  <RechartsTooltip
+                    cursor={{ fill: "rgba(16, 185, 129, 0.08)" }}
+                    contentStyle={{
+                      backgroundColor: "#0c0a09",
+                      border: "1px solid #44403c",
+                      borderRadius: 0,
+                      fontSize: "12px",
+                    }}
+                  />
+                  <Bar
+                    dataKey="records"
+                    name="Records"
+                    fill="#34d399"
+                    radius={[2, 2, 0, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </Panel>
+
+          <Panel title="Project Improvement Log">
+            <div className="space-y-3 text-sm">
+              <LogItem
+                date="Year 0"
+                title="Map-only prototype"
+                body="The original version visualized recent GBIF records, but it did not preserve a clear year-over-year story."
+              />
+              <LogItem
+                date="Year 1"
+                title="Evidence dashboard"
+                body="The tracker now compares complete-year records, shows current-season data separately, and links density scoring to selected map cells."
+              />
+              <LogItem
+                date="Now"
+                title="Maintainable student project"
+                body="Dependencies are current, the audit is clean, and the README explains how to run and evaluate the project."
+              />
+            </div>
+          </Panel>
+
+          <Panel title="Top Hotspots">
+            {topCells.length ? (
+              <div className="space-y-2">
+                {topCells.map((cell, index) => (
+                  <div
+                    key={cell.id}
+                    className="grid grid-cols-[24px_1fr_auto] items-center gap-2 border-b border-stone-800 pb-2 text-xs last:border-b-0 last:pb-0"
+                  >
+                    <span className="text-stone-500">{index + 1}</span>
+                    <span className="text-stone-300">
+                      {cell.lat.toFixed(1)}, {cell.lng.toFixed(1)}
+                    </span>
+                    <span className="font-semibold text-stone-100">
+                      {formatNumber(cell.count)}
                     </span>
                   </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* Eat It panel */}
-          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3 md:p-4 flex-1 flex flex-col">
-            <h2 className="text-sm font-semibold mb-1.5 flex items-center gap-2">
-              Eat It: Culinary Control Panel
-              <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 text-emerald-300">
-                Climate-positive gluttony
-              </span>
-            </h2>
-            <p className="text-xs text-slate-400 mb-3">
-              Use gastronomy as a management tool: target high-risk regions,
-              pay divers fairly, and turn barrens back into kelp forests.
-            </p>
-
-            <div className="grid grid-cols-2 gap-3 text-xs mb-3">
-              <MetricCard
-                label="Uni grade"
-                value={culinaryProfile?.uniGrade}
-              />
-              <MetricCard
-                label="Flavor profile"
-                value={culinaryProfile?.flavor}
-              />
-              <MetricCard
-                label="Texture"
-                value={culinaryProfile?.texture}
-              />
-              <MetricCard
-                label="Best for"
-                value={selectedSpecies?.regionHint}
-              />
-            </div>
-
-            <div className="mb-3">
-              <h3 className="text-xs font-semibold text-slate-200 mb-1">
-                Chef’s notes
-              </h3>
-              <p className="text-xs text-slate-300 leading-relaxed">
-                {culinaryProfile?.notes}
-              </p>
-            </div>
-
-            <div className="mb-3">
-              <h3 className="text-xs font-semibold text-slate-200 mb-1">
-                Recommended dishes
-              </h3>
-              <ul className="text-xs text-slate-300 list-disc list-inside space-y-0.5">
-                {culinaryProfile?.suggestedDishes?.map((d) => (
-                  <li key={d}>{d}</li>
                 ))}
-              </ul>
-            </div>
+              </div>
+            ) : (
+              <p className="text-sm text-stone-400">
+                No coordinate records found for this species in the current
+                GBIF window.
+              </p>
+            )}
+          </Panel>
 
-            <div className="mt-auto pt-2 border-t border-slate-800 text-[11px] text-slate-400">
-              <span className="font-semibold">Sustainability tip: </span>
-              {culinaryProfile?.sustainabilityTip}
+          <Panel title="Harvest Notes">
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <MetricCard label="Uni Grade" value={culinaryProfile.uniGrade} />
+              <MetricCard label="Flavor" value={culinaryProfile.flavor} />
+              <MetricCard label="Texture" value={culinaryProfile.texture} />
+              <MetricCard label="Range" value={selectedSpecies.rangeLabel} />
             </div>
-          </div>
-        </section>
+            <p className="mt-3 text-sm leading-relaxed text-stone-300">
+              {selectedSpecies.story}
+            </p>
+            <p className="mt-2 text-sm leading-relaxed text-stone-400">
+              {culinaryProfile.harvestUse}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {culinaryProfile.dishes.map((dish) => (
+                <span
+                  key={dish}
+                  className="border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-200"
+                >
+                  {dish}
+                </span>
+              ))}
+            </div>
+          </Panel>
+
+          <Panel title="Dataset Snapshot">
+            <div className="grid grid-cols-2 gap-2">
+              <MetricCard label="All Records" value={formatNumber(allRecords)} />
+              <MetricCard
+                label="Species Loaded"
+                value={`${SPECIES.length - failures.length}/${SPECIES.length}`}
+              />
+            </div>
+          </Panel>
+        </aside>
       </main>
     </div>
   );
 }
 
-// Small reusable metric card
+function LoadingPanel() {
+  return (
+    <div className="flex h-full min-h-[520px] items-center justify-center border border-stone-800 bg-stone-950 text-sm text-stone-400">
+      <span className="mr-3 h-4 w-4 animate-spin border-2 border-cyan-300 border-t-transparent" />
+      Fetching occurrence records from GBIF
+    </div>
+  );
+}
+
+function Panel({ title, children }) {
+  return (
+    <section className="border border-stone-800 bg-stone-950 p-4">
+      <h2 className="mb-2 text-sm font-semibold text-stone-100">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
 function MetricCard({ label, value }) {
   return (
-    <div className="bg-slate-950/60 border border-slate-800 rounded-xl px-2.5 py-2">
-      <div className="text-[10px] uppercase tracking-wide text-slate-500">
+    <div className="border border-stone-800 bg-neutral-950 px-3 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500">
         {label}
       </div>
-      <div className="text-xs font-semibold text-slate-100 truncate">
-        {value ?? "—"}
+      <div className="truncate text-xs font-semibold text-stone-100">
+        {value ?? "--"}
       </div>
+    </div>
+  );
+}
+
+function RiskPill({ risk }) {
+  const className =
+    risk === "High"
+      ? "border-orange-400/50 bg-orange-500/15 text-orange-200"
+      : risk === "Medium"
+        ? "border-emerald-400/50 bg-emerald-500/15 text-emerald-200"
+        : "border-cyan-400/50 bg-cyan-500/15 text-cyan-200";
+
+  return (
+    <span className={`border px-2 py-1 text-xs font-semibold ${className}`}>
+      {risk}
+    </span>
+  );
+}
+
+function LogItem({ date, title, body }) {
+  return (
+    <div className="border-b border-stone-800 pb-3 last:border-b-0 last:pb-0">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300">
+        {date}
+      </div>
+      <div className="mt-1 text-sm font-semibold text-stone-100">{title}</div>
+      <p className="mt-1 text-xs leading-relaxed text-stone-400">{body}</p>
     </div>
   );
 }
