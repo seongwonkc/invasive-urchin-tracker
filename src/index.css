@@ -2,12 +2,93 @@
 @tailwind components;
 @tailwind utilities;
 
+html {
+  color-scheme: dark;
+}
+
 body {
-  @apply bg-slate-950 text-slate-100;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
+  @apply bg-ink-950 font-sans text-foam antialiased;
 }
 
 #root {
   @apply min-h-screen;
+}
+
+/* Header urchin: slow spin, spines breathe. */
+.urchin-spin {
+  transform-origin: 50px 50px;
+  animation: urchin-spin 60s linear infinite;
+}
+.urchin-spine {
+  transform-origin: 50px 50px;
+  animation: urchin-breathe 3.2s ease-in-out infinite;
+}
+@keyframes urchin-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes urchin-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.94);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .urchin-spin,
+  .urchin-spine {
+    animation: none;
+  }
+}
+
+/* Leaflet, dark theme */
+.leaflet-container {
+  background: #081120;
+  font-family: Inter, system-ui, sans-serif;
+  cursor: crosshair;
+}
+.map-placing.leaflet-container,
+.map-placing .leaflet-interactive {
+  cursor: copy;
+}
+.leaflet-control-attribution {
+  background: rgba(5, 10, 20, 0.8) !important;
+  color: #9fb0cc !important;
+  font-size: 10px;
+}
+.leaflet-control-attribution a {
+  color: #c4b5fd !important;
+}
+.leaflet-bar a {
+  background: #0c1830;
+  color: #e8f0fb;
+  border-bottom-color: #1b2d50;
+}
+.leaflet-bar a:hover {
+  background: #11203d;
+  color: #ffffff;
+}
+.leaflet-bar {
+  border: 1px solid #1b2d50 !important;
+}
+.leaflet-top.leaflet-left {
+  top: 64px;
+}
+.leaflet-tooltip {
+  background: #050a14;
+  color: #e8f0fb;
+  border: 1px solid #2a3f66;
+  border-radius: 8px;
+  box-shadow: none;
+}
+.leaflet-tooltip-top:before {
+  border-top-color: #2a3f66;
+}
+
+/* Tint the gray basemap toward the site's ink navy. */
+.basemap {
+  filter: sepia(0.35) hue-rotate(180deg) saturate(1.6) brightness(0.85);
 }

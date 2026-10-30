@@ -1,693 +1,483 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { MotionConfig, motion } from "motion/react";
+
+import Counter from "./components/Counter";
+import FieldLog from "./components/FieldLog";
+import MapView from "./components/MapView";
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Legend,
-  ResponsiveContainer,
-  Tooltip as RechartsTooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-
-import MapComponent from "./MapComponent";
+  ActionLog,
+  EvidencePanel,
+  PhotoStrip,
+  PointPanel,
+  SpeciesDossier,
+} from "./components/Panels";
+import UrchinMark from "./components/UrchinMark";
+import { ACTION_LOG, GROUPS, REGIONS, SPECIES, TROPICA_URL } from "./data";
+import { loadLog, normalizeEntry, saveLog, summarize } from "./fieldLog";
 import {
-  ACTION_LOG,
-  CAMPAIGN_METRICS,
-  SPECIES,
-  computeGridCells,
-  computeYearlyEvidence,
-  fetchAllSpeciesOccurrences,
-} from "./api";
+  bboxForZoom,
+  densityTileUrl,
+  fetchCount,
+  fetchPhotos,
+  fetchRecordsInBox,
+  fetchSpeciesStats,
+  windowYears,
+} from "./gbif";
+import { useAsync } from "./useAsync";
 
-const CATEGORY_ALL = "All";
+const SPECIES_BY_ID = Object.fromEntries(SPECIES.map((species) => [species.id, species]));
 
-function riskSummaryToChart(summary) {
-  if (!summary) return [];
+const WINDOWS = [
+  { id: "all", label: "All years" },
+  { id: "recent", label: "Last 5 years" },
+];
 
-  return [
-    { name: "High", value: summary.highCount },
-    { name: "Medium", value: summary.medCount },
-    { name: "Low", value: summary.lowCount },
-  ];
+const rise = {
+  hidden: { opacity: 0, y: 18 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.55, ease: [0.16, 1, 0.3, 1] } },
+};
+const stagger = { hidden: {}, show: { transition: { staggerChildren: 0.07 } } };
+
+function today() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset() * 60000;
+  return new Date(now - offset).toISOString().slice(0, 10);
 }
 
-function formatNumber(value) {
-  return new Intl.NumberFormat("en-US").format(value || 0);
+function initialSpeciesId() {
+  try {
+    const requested = new URLSearchParams(window.location.search).get("species");
+    if (requested && SPECIES_BY_ID[requested]) return requested;
+  } catch {
+    // Fall through to the default species.
+  }
+  return "purple-urchin";
 }
 
-function sampleLocation(sample) {
-  return [sample.locality, sample.stateProvince, sample.country, sample.year]
-    .filter(Boolean)
-    .join(" / ");
+function syncSpeciesParam(id) {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("species", id);
+    window.history.replaceState(null, "", url);
+  } catch {
+    // URL sync is a convenience only.
+  }
+}
+
+function emptyDraft(speciesId) {
+  return { date: today(), site: "", speciesId, count: "", depthM: "", lat: "", lng: "", notes: "" };
 }
 
 function App() {
-  const [speciesData, setSpeciesData] = useState({});
-  const [failures, setFailures] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedSpeciesId, setSelectedSpeciesId] = useState("lionfish");
-  const [activeCategory, setActiveCategory] = useState(CATEGORY_ALL);
-  const [selectedCell, setSelectedCell] = useState(null);
-  const [recipeSpeciesId, setRecipeSpeciesId] = useState("lionfish");
+  const [speciesId, setSpeciesId] = useState(initialSpeciesId);
+  const [group, setGroup] = useState(() => SPECIES_BY_ID[speciesId].group);
+  const [regionId, setRegionId] = useState("world");
+  const [windowId, setWindowId] = useState("all");
+  const [point, setPoint] = useState(null);
+  const [placing, setPlacing] = useState(false);
+  const [entries, setEntries] = useState(loadLog);
+  const [storageOk, setStorageOk] = useState(true);
+  const [draft, setDraft] = useState(() => emptyDraft(speciesId));
+  const mapRef = useRef(null);
+  const logRef = useRef(null);
 
-  useEffect(() => {
-    let isMounted = true;
+  const species = SPECIES_BY_ID[speciesId];
+  const region = REGIONS[regionId];
+  const country = region.country;
+  const yearRange = windowYears(windowId);
+  const isKorea = regionId === "korea";
 
-    async function load() {
-      setLoading(true);
-      setFailures([]);
+  const counts = useAsync(`counts:${country || "all"}`, async (signal) => {
+    const values = await Promise.all(
+      SPECIES.map((item) => fetchCount(item.taxonKey, { country }, signal).catch(() => null))
+    );
+    return Object.fromEntries(SPECIES.map((item, index) => [item.id, values[index]]));
+  });
 
-      try {
-        const result = await fetchAllSpeciesOccurrences();
-
-        if (!isMounted) return;
-
-        setSpeciesData(result.data);
-        setFailures(result.failures);
-
-        const firstSpeciesWithData = SPECIES.find(
-          (species) => result.data[species.id]?.length
-        );
-
-        if (firstSpeciesWithData) {
-          setSelectedSpeciesId((current) =>
-            result.data[current]?.length ? current : firstSpeciesWithData.id
-          );
-          setRecipeSpeciesId((current) =>
-            result.data[current]?.length ? current : firstSpeciesWithData.id
-          );
-        }
-      } catch (error) {
-        if (isMounted) {
-          setSpeciesData({});
-          setFailures([
-            {
-              speciesId: "all",
-              commonName: "GBIF",
-              message: error.message || "Could not load occurrence data",
-            },
-          ]);
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
-      }
-    }
-
-    load();
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  const categories = useMemo(
-    () => [CATEGORY_ALL, ...new Set(SPECIES.map((species) => species.category))],
-    []
+  const stats = useAsync(`stats:${species.taxonKey}:${country || "all"}`, (signal) =>
+    fetchSpeciesStats(species.taxonKey, { country }, signal)
   );
 
-  const selectedSpecies =
-    SPECIES.find((species) => species.id === selectedSpeciesId) || SPECIES[0];
-
-  const recipeSpecies =
-    SPECIES.find((species) => species.id === recipeSpeciesId) || selectedSpecies;
-
-  const filteredSpecies = useMemo(
-    () =>
-      activeCategory === CATEGORY_ALL
-        ? SPECIES
-        : SPECIES.filter((species) => species.category === activeCategory),
-    [activeCategory]
+  const photos = useAsync(`photos:${species.taxonKey}:${country || "all"}`, (signal) =>
+    fetchPhotos(species.taxonKey, { country }, signal)
   );
 
-  const gridData = useMemo(
-    () =>
-      computeGridCells(
-        speciesData[selectedSpeciesId] || [],
-        1,
-        selectedSpecies.thresholds
-      ),
-    [selectedSpecies, selectedSpeciesId, speciesData]
+  const pointKey = point
+    ? `point:${species.taxonKey}:${windowId}:${point.lat.toFixed(4)}:${point.lng.toFixed(4)}:${point.zoom}`
+    : null;
+  const pointResult = useAsync(pointKey, (signal) =>
+    fetchRecordsInBox(species.taxonKey, point.box, { yearRange }, signal)
   );
 
-  const riskChartData = useMemo(
-    () => riskSummaryToChart(gridData.summary),
-    [gridData.summary]
-  );
-
-  const yearlyEvidence = useMemo(
-    () =>
-      computeYearlyEvidence(
-        speciesData[selectedSpeciesId] || [],
-        1,
-        selectedSpecies.thresholds
-      ),
-    [selectedSpecies, selectedSpeciesId, speciesData]
-  );
-
-  const topCells = gridData.cells.slice(0, 5);
-  const allRecords = SPECIES.reduce(
-    (sum, species) => sum + (speciesData[species.id]?.length || 0),
+  const tileUrl = densityTileUrl(species.taxonKey, { yearRange });
+  const groupSpecies = SPECIES.filter((item) => item.group === group);
+  const urchinTotal = SPECIES.filter((item) => item.group === "urchin").reduce(
+    (sum, item) => sum + (counts.data?.[item.id] || 0),
     0
   );
-  const loadedSpecies = SPECIES.filter(
-    (species) => (speciesData[species.id] || []).length > 0
-  ).length;
-  const highRiskPercent =
-    gridData.summary.cellCount > 0
-      ? Math.round((gridData.summary.highCount / gridData.summary.cellCount) * 100)
-      : 0;
+  const logSummary = summarize(entries);
+  const draftPoint =
+    draft.lat !== "" && draft.lng !== "" && Number.isFinite(Number(draft.lat)) && Number.isFinite(Number(draft.lng))
+      ? { lat: Number(draft.lat), lng: Number(draft.lng) }
+      : null;
 
-  function selectSpecies(speciesId) {
-    setSelectedSpeciesId(speciesId);
-    setRecipeSpeciesId(speciesId);
-    setSelectedCell(null);
+  const mapEntries = useMemo(
+    () => entries.filter((entry) => Number.isFinite(entry.lat) && Number.isFinite(entry.lng)),
+    [entries]
+  );
+
+  function persist(next) {
+    setEntries(next);
+    setStorageOk(saveLog(next));
+  }
+
+  function selectSpecies(id) {
+    setSpeciesId(id);
+    syncSpeciesParam(id);
+    setPoint(null);
+    setDraft((current) => (current.site || current.lat ? current : { ...current, speciesId: id }));
+  }
+
+  function selectGroup(id) {
+    setGroup(id);
+    const first = SPECIES.find((item) => item.group === id);
+    if (first && SPECIES_BY_ID[speciesId].group !== id) selectSpecies(first.id);
+  }
+
+  function handleMapClick({ lat, lng, zoom }) {
+    if (placing) {
+      setDraft((current) => ({ ...current, lat: lat.toFixed(5), lng: lng.toFixed(5) }));
+      setPlacing(false);
+      logRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    setPoint({ lat, lng, zoom, box: bboxForZoom(lat, lng, zoom) });
+  }
+
+  function togglePlace() {
+    const next = !placing;
+    setPlacing(next);
+    if (next) mapRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   return (
-    <div className="min-h-screen bg-[#10100e] text-stone-100">
-      <header className="border-b border-stone-800 bg-[#10100e]">
-        <div className="mx-auto grid max-w-7xl gap-6 px-4 py-7 lg:grid-cols-[1.4fr_0.9fr]">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-300">
-              Student-led citizen science
-            </p>
-            <h1 className="mt-2 max-w-4xl text-3xl font-semibold tracking-tight text-white md:text-5xl">
-              Invasivore Atlas
-            </h1>
-            <p className="mt-3 max-w-3xl text-base leading-relaxed text-stone-300">
-              A high-school activism dashboard that maps edible invasive or
-              overabundant species, turns public biodiversity data into action
-              targets, and gives volunteers a recipe they can open in one click.
-            </p>
-            <div className="mt-5 flex flex-wrap gap-2">
-              <button
-                className="border border-emerald-300 bg-emerald-300 px-4 py-2 text-sm font-semibold text-neutral-950"
-                onClick={() => setRecipeSpeciesId(selectedSpeciesId)}
-              >
-                Open current recipe
-              </button>
+    <MotionConfig reducedMotion="user">
+      <div className="relative min-h-screen overflow-x-hidden bg-ink-950 text-foam">
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-[520px] bg-[radial-gradient(ellipse_at_top_left,rgba(124,58,237,0.28),transparent_60%),radial-gradient(ellipse_at_top_right,rgba(255,154,46,0.12),transparent_55%)]" />
+
+        <header className="relative">
+          <motion.div
+            className="mx-auto max-w-7xl px-4 pb-8 pt-6 sm:px-6"
+            variants={stagger}
+            initial="hidden"
+            animate="show"
+          >
+            <motion.nav variants={rise} className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.22em] text-mist">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-kelp-400" />
+                Student citizen science · live GBIF data
+              </div>
               <a
-                className="border border-stone-600 px-4 py-2 text-sm font-semibold text-stone-200 hover:border-stone-400"
-                href={selectedSpecies.sourceUrl}
+                href={TROPICA_URL}
                 target="_blank"
                 rel="noreferrer"
+                className="group inline-flex items-center gap-2 rounded-full border border-uni-500/60 bg-uni-500/10 px-4 py-2 text-sm font-semibold text-uni-300 transition hover:bg-uni-500 hover:text-ink-950"
               >
-                Read source
+                TROPICA recipe book
+                <span className="transition-transform group-hover:translate-x-0.5">→</span>
               </a>
+            </motion.nav>
+
+            <div className="mt-8 grid items-end gap-8 lg:grid-cols-[1.3fr_1fr]">
+              <div>
+                <motion.div variants={rise} className="flex items-center gap-4">
+                  <UrchinMark className="h-16 w-16 shrink-0 sm:h-20 sm:w-20" />
+                  <h1 className="font-display text-4xl font-bold leading-[0.95] tracking-tight sm:text-6xl">
+                    Urchin
+                    <br />
+                    <span className="text-uni-400">Tracker</span>
+                  </h1>
+                </motion.div>
+                <motion.p variants={rise} className="mt-5 max-w-xl text-base leading-relaxed text-foam/80 sm:text-lg">
+                  Where sea urchins pile up, kelp and seaweed forests can turn into
+                  bare rock. This map pulls every public GBIF record for the urchins
+                  behind those barrens, from California to Korea's East Sea, and
+                  lets you log what you see on your own dives.
+                </motion.p>
+              </div>
+
+              <motion.dl variants={stagger} className="grid grid-cols-2 gap-2.5">
+                <HeroStat label={`GBIF urchin records · ${region.label}`} loading={counts.loading}>
+                  <Counter value={urchinTotal} />
+                </HeroStat>
+                <HeroStat label="Urchin species tracked">
+                  <Counter value={SPECIES.filter((item) => item.group === "urchin").length} />
+                </HeroStat>
+                <HeroStat label="Your logged sightings">
+                  <Counter value={logSummary.sightings} />
+                </HeroStat>
+                <HeroStat label="Your logged sites">
+                  <Counter value={logSummary.sites} />
+                </HeroStat>
+              </motion.dl>
             </div>
+          </motion.div>
+        </header>
+
+        <main className="relative mx-auto max-w-7xl space-y-5 px-4 pb-16 sm:px-6">
+          <motion.section
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.25, duration: 0.5 }}
+            className="rounded-2xl border border-ink-700/70 bg-ink-900/70 p-3 backdrop-blur sm:p-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <Segmented
+                options={GROUPS}
+                value={group}
+                onChange={selectGroup}
+                ariaLabel="Species group"
+              />
+              <Segmented
+                options={Object.values(REGIONS)}
+                value={regionId}
+                onChange={(id) => {
+                  setRegionId(id);
+                  setPoint(null);
+                }}
+                ariaLabel="Region"
+              />
+            </div>
+            <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+              {groupSpecies.map((item) => (
+                <SpeciesChip
+                  key={item.id}
+                  species={item}
+                  count={counts.data?.[item.id]}
+                  loading={counts.loading}
+                  selected={item.id === speciesId}
+                  onSelect={() => selectSpecies(item.id)}
+                />
+              ))}
+            </div>
+          </motion.section>
+
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
+            <div className="min-w-0 space-y-5">
+              <section
+                ref={mapRef}
+                className="relative h-[460px] overflow-hidden rounded-2xl border border-ink-700/70 bg-ink-900 sm:h-[600px]"
+              >
+                <MapView
+                  tileUrl={tileUrl}
+                  regionId={regionId}
+                  mode={placing ? "place" : "inspect"}
+                  box={point?.box}
+                  fieldEntries={mapEntries}
+                  draftPoint={draftPoint}
+                  speciesById={SPECIES_BY_ID}
+                  onMapClick={handleMapClick}
+                />
+                <div className="pointer-events-none absolute left-3 right-3 top-3 z-[500] flex flex-wrap items-start justify-between gap-2">
+                  <div className="pointer-events-auto rounded-xl border border-ink-700 bg-ink-950/85 px-3 py-2 backdrop-blur">
+                    <p className="font-display text-sm font-semibold">
+                      {species.commonName}
+                      {species.koreanName && (
+                        <span className="ml-1.5 text-urchin-300">{species.koreanName}</span>
+                      )}
+                    </p>
+                    <p className="text-[11px] text-mist">
+                      {placing ? "Click the map to place your sighting" : "Tap the map to inspect records"}
+                    </p>
+                  </div>
+                  <div className="pointer-events-auto">
+                    <Segmented options={WINDOWS} value={windowId} onChange={setWindowId} ariaLabel="Time window" small />
+                  </div>
+                </div>
+                <div className="pointer-events-none absolute bottom-12 left-3 z-[500] sm:bottom-8 rounded-xl border border-ink-700 bg-ink-950/85 px-3 py-2 text-[11px] text-mist backdrop-blur">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span>fewer</span>
+                    <span className="h-2 w-24 rounded-full bg-gradient-to-r from-[#ffff00] via-[#ff9900] to-[#ff2200]" />
+                    <span>more records</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-2.5 w-2.5 rounded-full border-2 border-white bg-kelp-400" />
+                    your sightings
+                  </div>
+                </div>
+              </section>
+
+              <PhotoStrip
+                photos={photos.data}
+                loading={photos.loading}
+                error={photos.error}
+                species={species}
+              />
+            </div>
+
+            <aside className="min-w-0 space-y-5">
+              <SpeciesDossier species={species} />
+              <PointPanel
+                point={point}
+                result={pointResult.data}
+                loading={pointResult.loading}
+                error={pointResult.error}
+                species={species}
+                onClear={() => setPoint(null)}
+              />
+              <EvidencePanel
+                stats={stats.data}
+                loading={stats.loading}
+                error={stats.error}
+                regionLabel={region.label}
+                isKorea={isKorea}
+              />
+            </aside>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            {CAMPAIGN_METRICS.map((metric) => (
-              <HeroMetric
-                key={metric.label}
-                label={metric.label}
-                value={metric.value}
-              />
-            ))}
-            <HeroMetric label="GBIF records loaded" value={formatNumber(allRecords)} />
-            <HeroMetric
-              label="Species with live data"
-              value={`${loadedSpecies}/${SPECIES.length}`}
+          <div ref={logRef} className="scroll-mt-4">
+            <FieldLog
+              entries={entries}
+              draft={draft}
+              onDraftChange={setDraft}
+              onSubmit={() => {
+                persist([...entries, normalizeEntry(draft)]);
+                setDraft(emptyDraft(draft.speciesId));
+              }}
+              onDelete={(id) => persist(entries.filter((entry) => entry.id !== id))}
+              onImport={(imported) => persist([...entries, ...imported])}
+              species={SPECIES}
+              speciesById={SPECIES_BY_ID}
+              placing={placing}
+              onTogglePlace={togglePlace}
+              storageOk={storageOk}
             />
           </div>
-        </div>
-      </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-5">
-        <section className="grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.85fr)]">
-          <div className="space-y-5">
-            <Panel title="Choose a Target Species">
-              <div className="mb-4 flex flex-wrap gap-2">
-                {categories.map((category) => (
-                  <button
-                    key={category}
-                    onClick={() => setActiveCategory(category)}
-                    className={`border px-3 py-1.5 text-xs font-semibold transition ${
-                      activeCategory === category
-                        ? "border-emerald-300 bg-emerald-300 text-neutral-950"
-                        : "border-stone-700 bg-neutral-950 text-stone-300 hover:border-stone-500"
-                    }`}
-                  >
-                    {category}
-                  </button>
-                ))}
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <ActionLog entries={ACTION_LOG} />
+            <section className="flex flex-col justify-between overflow-hidden rounded-2xl border border-uni-500/40 bg-gradient-to-br from-uni-500/20 via-ink-900 to-urchin-600/20 p-5">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-uni-300">
+                  From map to plate
+                </p>
+                <h2 className="mt-1 font-display text-3xl font-semibold leading-tight">
+                  Every species here has a recipe in TROPICA.
+                </h2>
+                <p className="mt-3 text-sm leading-relaxed text-foam/80">
+                  The tracker shows where the pressure is. TROPICA is the cookbook
+                  that turns overabundant urchins and invasive fish into dinner,
+                  with sourcing and safety notes for each dish.
+                </p>
               </div>
-
-              <div className="grid gap-3 md:grid-cols-2">
-                {filteredSpecies.map((species) => (
-                  <SpeciesCard
-                    key={species.id}
-                    species={species}
-                    count={speciesData[species.id]?.length || 0}
-                    loading={loading}
-                    selected={selectedSpeciesId === species.id}
-                    onSelect={() => selectSpecies(species.id)}
-                    onRecipe={() => setRecipeSpeciesId(species.id)}
-                  />
-                ))}
-              </div>
-            </Panel>
-
-            {failures.length > 0 && (
-              <div className="border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                Some GBIF requests failed. Available species are still shown.
-                <span className="ml-2 text-amber-200/80">
-                  {failures.map((failure) => failure.commonName).join(", ")}
-                </span>
-              </div>
-            )}
-
-            <div className="min-h-[560px]">
-              {loading ? (
-                <LoadingPanel />
-              ) : (
-                <MapComponent
-                  gridData={gridData}
-                  selectedSpecies={selectedSpecies}
-                  onCellClick={setSelectedCell}
-                />
-              )}
-            </div>
-
-            <Panel title="Student Action Log">
-              <div className="grid gap-3 md:grid-cols-2">
-                {ACTION_LOG.map((entry) => (
-                  <LogItem
-                    key={`${entry.date}-${entry.title}`}
-                    date={entry.date}
-                    title={entry.title}
-                    body={entry.text}
-                  />
-                ))}
-              </div>
-            </Panel>
-          </div>
-
-          <aside className="space-y-5">
-            <RecipePanel species={recipeSpecies} />
-
-            <Panel title="Current Map Evidence">
-              <div className="grid grid-cols-2 gap-2">
-                <MetricCard
-                  label="Scientific name"
-                  value={selectedSpecies.scientificName}
-                />
-                <MetricCard label="Region" value={selectedSpecies.regionHint} />
-                <MetricCard
-                  label="Records"
-                  value={formatNumber(gridData.summary.totalRecords)}
-                />
-                <MetricCard
-                  label="High-density cells"
-                  value={`${gridData.summary.highCount} (${highRiskPercent}%)`}
-                />
-              </div>
-              <p className="mt-3 text-xs leading-relaxed text-stone-400">
-                {selectedSpecies.story}
-              </p>
-              <p className="mt-2 text-xs leading-relaxed text-emerald-200">
-                Student action: {selectedSpecies.activismAction}
-              </p>
               <a
-                className="mt-3 inline-block text-xs font-semibold text-cyan-300 underline-offset-4 hover:underline"
-                href={selectedSpecies.sourceUrl}
+                href={TROPICA_URL}
                 target="_blank"
                 rel="noreferrer"
+                className="group mt-5 inline-flex w-fit items-center gap-2 rounded-full bg-uni-500 px-5 py-2.5 text-sm font-semibold text-ink-950 transition hover:bg-uni-400"
               >
-                Source: {selectedSpecies.sourceName}
+                Open the recipe book
+                <span className="transition-transform group-hover:translate-x-1">→</span>
               </a>
-            </Panel>
+            </section>
+          </div>
 
-            <Panel title="Risk Distribution">
-              <p className="mb-3 text-xs leading-relaxed text-stone-400">
-                Density scoring is species-specific. High starts at{" "}
-                {selectedSpecies.thresholds.high}+ records per 1-degree cell;
-                medium starts at {selectedSpecies.thresholds.medium}+.
-              </p>
-              <div className="h-40">
-                <ResponsiveContainer>
-                  <BarChart data={riskChartData} margin={{ top: 4, right: 8 }}>
-                    <CartesianGrid stroke="#292524" vertical={false} />
-                    <XAxis
-                      dataKey="name"
-                      tick={{ fontSize: 11, fill: "#a8a29e" }}
-                      axisLine={{ stroke: "#44403c" }}
-                    />
-                    <YAxis
-                      allowDecimals={false}
-                      tick={{ fontSize: 11, fill: "#a8a29e" }}
-                      axisLine={{ stroke: "#44403c" }}
-                    />
-                    <RechartsTooltip
-                      cursor={{ fill: "rgba(52, 211, 153, 0.08)" }}
-                      contentStyle={{
-                        backgroundColor: "#0c0a09",
-                        border: "1px solid #44403c",
-                        borderRadius: 0,
-                        fontSize: "12px",
-                      }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: "11px" }} />
-                    <Bar
-                      dataKey="value"
-                      name="Grid cells"
-                      fill="#34d399"
-                      radius={[2, 2, 0, 0]}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </Panel>
-
-            <Panel title="One-Year Evidence">
-              <p className="mb-3 text-xs leading-relaxed text-stone-400">
-                The last two complete years are compared fairly; the current
-                year is shown as season-to-date.
-              </p>
-              <div className="mb-3 grid grid-cols-2 gap-2">
-                <MetricCard
-                  label={`${yearlyEvidence.previous.year} records`}
-                  value={formatNumber(yearlyEvidence.previous.records)}
-                />
-                <MetricCard
-                  label={`${yearlyEvidence.latestComplete.year} records`}
-                  value={formatNumber(yearlyEvidence.latestComplete.records)}
-                />
-                <MetricCard
-                  label="Change"
-                  value={
-                    yearlyEvidence.recordDeltaPercent === null
-                      ? "New baseline"
-                      : `${yearlyEvidence.recordDelta >= 0 ? "+" : ""}${formatNumber(
-                          yearlyEvidence.recordDelta
-                        )} (${yearlyEvidence.recordDeltaPercent}%)`
-                  }
-                />
-                <MetricCard
-                  label={`${yearlyEvidence.current.year} YTD`}
-                  value={`${formatNumber(yearlyEvidence.current.records)} records`}
-                />
-              </div>
-              <div className="h-32">
-                <ResponsiveContainer>
-                  <BarChart data={yearlyEvidence.years} margin={{ top: 4, right: 8 }}>
-                    <CartesianGrid stroke="#292524" vertical={false} />
-                    <XAxis
-                      dataKey="label"
-                      tick={{ fontSize: 11, fill: "#a8a29e" }}
-                      axisLine={{ stroke: "#44403c" }}
-                    />
-                    <YAxis
-                      allowDecimals={false}
-                      tick={{ fontSize: 11, fill: "#a8a29e" }}
-                      axisLine={{ stroke: "#44403c" }}
-                    />
-                    <RechartsTooltip
-                      cursor={{ fill: "rgba(16, 185, 129, 0.08)" }}
-                      contentStyle={{
-                        backgroundColor: "#0c0a09",
-                        border: "1px solid #44403c",
-                        borderRadius: 0,
-                        fontSize: "12px",
-                      }}
-                    />
-                    <Bar
-                      dataKey="records"
-                      name="Records"
-                      fill="#67e8f9"
-                      radius={[2, 2, 0, 0]}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </Panel>
-
-            <Panel title="Selected Cell">
-              {selectedCell ? (
-                <div className="space-y-3 text-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="text-stone-400">Risk</span>
-                    <RiskPill risk={selectedCell.risk} />
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-stone-400">Reports</span>
-                    <span className="font-semibold">
-                      {formatNumber(selectedCell.count)}
-                    </span>
-                  </div>
-                  <div>
-                    <div className="mb-1 text-xs uppercase tracking-wider text-stone-500">
-                      Example records
-                    </div>
-                    <div className="space-y-1 text-xs text-stone-300">
-                      {selectedCell.samples.map((sample) => (
-                        <div key={sample.key || sampleLocation(sample)}>
-                          {sampleLocation(sample) || "Unknown location"}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-sm text-stone-400">
-                  Select a map marker to inspect records from that grid cell.
-                </p>
-              )}
-            </Panel>
-
-            <Panel title="Top Hotspots">
-              {topCells.length ? (
-                <div className="space-y-2">
-                  {topCells.map((cell, index) => (
-                    <div
-                      key={cell.id}
-                      className="grid grid-cols-[24px_1fr_auto] items-center gap-2 border-b border-stone-800 pb-2 text-xs last:border-b-0 last:pb-0"
-                    >
-                      <span className="text-stone-500">{index + 1}</span>
-                      <span className="text-stone-300">
-                        {cell.lat.toFixed(1)}, {cell.lng.toFixed(1)}
-                      </span>
-                      <span className="font-semibold text-stone-100">
-                        {formatNumber(cell.count)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-stone-400">
-                  No coordinate records found for this species in the current
-                  GBIF window.
-                </p>
-              )}
-            </Panel>
-          </aside>
-        </section>
-      </main>
-    </div>
-  );
-}
-
-function HeroMetric({ label, value }) {
-  return (
-    <div className="border border-stone-800 bg-stone-950 px-4 py-3">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500">
-        {label}
+          <footer className="border-t border-ink-700 pt-5 text-xs leading-relaxed text-mist">
+            This is a public-data prototype, not an official monitoring system.
+            GBIF records can include sampling bias, duplicate survey effort, and
+            uneven regional coverage. Always follow local harvest, transport,
+            possession, and fish/shellfish consumption rules. Occurrence data and
+            density tiles from{" "}
+            <a className="text-urchin-300 hover:underline" href="https://www.gbif.org" target="_blank" rel="noreferrer">
+              GBIF.org
+            </a>
+            ; photos belong to their credited creators.
+          </footer>
+        </main>
       </div>
-      <div className="mt-1 text-2xl font-semibold text-white">{value}</div>
+    </MotionConfig>
+  );
+}
+
+function HeroStat({ label, loading, children }) {
+  return (
+    <motion.div
+      variants={rise}
+      className="rounded-2xl border border-ink-700/80 bg-ink-900/70 px-4 py-3 backdrop-blur"
+    >
+      <dt className="font-mono text-[10px] uppercase leading-tight tracking-[0.16em] text-mist">{label}</dt>
+      <dd className={`mt-1 font-display text-2xl font-semibold sm:text-3xl ${loading ? "animate-pulse opacity-60" : ""}`}>
+        {children}
+      </dd>
+    </motion.div>
+  );
+}
+
+function Segmented({ options, value, onChange, ariaLabel, small = false }) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={ariaLabel}
+      className="relative inline-flex rounded-full border border-ink-700 bg-ink-950/80 p-1 backdrop-blur"
+    >
+      {options.map((option) => {
+        const active = option.id === value;
+        return (
+          <button
+            key={option.id}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(option.id)}
+            className={`relative rounded-full font-medium transition-colors ${
+              small ? "px-2.5 py-1 text-[11px]" : "px-3.5 py-1.5 text-xs sm:text-sm"
+            } ${active ? "text-ink-950" : "text-mist hover:text-foam"}`}
+          >
+            {active && (
+              <motion.span
+                layoutId={`seg-${ariaLabel}`}
+                className="absolute inset-0 rounded-full bg-foam"
+                transition={{ type: "spring", stiffness: 420, damping: 34 }}
+              />
+            )}
+            <span className="relative">{option.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-function SpeciesCard({ species, count, loading, selected, onSelect, onRecipe }) {
+function SpeciesChip({ species, count, loading, selected, onSelect }) {
   return (
-    <article
-      className={`border p-4 transition ${
+    <motion.button
+      type="button"
+      onClick={onSelect}
+      whileTap={{ scale: 0.97 }}
+      aria-pressed={selected}
+      className={`relative min-w-[170px] shrink-0 rounded-xl border px-3 py-2.5 text-left transition-colors ${
         selected
-          ? "border-emerald-300 bg-emerald-300/10"
-          : "border-stone-800 bg-neutral-950 hover:border-stone-600"
+          ? "border-urchin-400 bg-urchin-500/15"
+          : "border-ink-700 bg-ink-950/50 hover:border-ink-600"
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
-            {species.category}
-          </div>
-          <h3 className="mt-1 text-base font-semibold text-stone-100">
-            {species.commonName}
-          </h3>
-          <p className="mt-1 text-xs italic text-stone-500">
-            {species.scientificName}
-          </p>
-        </div>
-        <div className="text-right text-xs text-stone-400">
-          <span className="block font-semibold text-stone-100">
-            {loading ? "..." : formatNumber(count)}
-          </span>
-          records
-        </div>
-      </div>
-      <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-stone-300">
-        {species.story}
-      </p>
-      <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-stone-300">
-        <span className="border border-stone-700 px-2 py-1">
-          {species.managementType}
-        </span>
-        <span className="border border-stone-700 px-2 py-1">
-          {species.regionHint}
-        </span>
-      </div>
-      <div className="mt-4 flex gap-2">
-        <button
-          className={`flex-1 border px-3 py-2 text-xs font-semibold ${
-            selected
-              ? "border-emerald-300 bg-emerald-300 text-neutral-950"
-              : "border-stone-600 text-stone-200 hover:border-stone-400"
-          }`}
-          onClick={onSelect}
-        >
-          Map species
-        </button>
-        <button
-          className="flex-1 border border-cyan-400/60 px-3 py-2 text-xs font-semibold text-cyan-200 hover:border-cyan-300"
-          onClick={onRecipe}
-        >
-          Recipe
-        </button>
-      </div>
-      <a
-        className="mt-3 inline-block text-xs font-semibold text-stone-400 underline-offset-4 hover:text-cyan-200 hover:underline"
-        href={species.sourceUrl}
-        target="_blank"
-        rel="noreferrer"
-      >
-        Source: {species.sourceName}
-      </a>
-    </article>
-  );
-}
-
-function RecipePanel({ species }) {
-  const { recipe } = species;
-
-  return (
-    <section className="border border-emerald-300 bg-emerald-300 text-neutral-950">
-      <div className="border-b border-neutral-950/25 px-4 py-3">
-        <div className="text-[10px] font-bold uppercase tracking-[0.2em]">
-          One-click recipe
-        </div>
-        <h2 className="mt-1 text-xl font-semibold">{recipe.title}</h2>
-        <p className="mt-1 text-sm">
-          {species.commonName} - {recipe.flavor}
-        </p>
-      </div>
-      <div className="grid grid-cols-3 border-b border-neutral-950/25 text-center text-xs font-semibold">
-        <div className="border-r border-neutral-950/25 p-3">
-          <span className="block text-[10px] uppercase tracking-wider opacity-70">
-            Time
-          </span>
-          {recipe.time}
-        </div>
-        <div className="border-r border-neutral-950/25 p-3">
-          <span className="block text-[10px] uppercase tracking-wider opacity-70">
-            Skill
-          </span>
-          {recipe.skill}
-        </div>
-        <div className="p-3">
-          <span className="block text-[10px] uppercase tracking-wider opacity-70">
-            Yield
-          </span>
-          {recipe.yield}
-        </div>
-      </div>
-      <div className="grid gap-4 p-4 md:grid-cols-2 xl:grid-cols-1">
-        <div>
-          <h3 className="text-sm font-bold uppercase tracking-wider">
-            Ingredients
-          </h3>
-          <ul className="mt-2 space-y-1 text-sm">
-            {recipe.ingredients.map((ingredient) => (
-              <li key={ingredient}>- {ingredient}</li>
-            ))}
-          </ul>
-        </div>
-        <div>
-          <h3 className="text-sm font-bold uppercase tracking-wider">Steps</h3>
-          <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">
-            {recipe.steps.map((step) => (
-              <li key={step}>{step}</li>
-            ))}
-          </ol>
-        </div>
-      </div>
-      <div className="border-t border-neutral-950/25 p-4 text-sm">
-        <span className="font-bold">Safety note: </span>
-        {species.safety}
-      </div>
-    </section>
-  );
-}
-
-function LoadingPanel() {
-  return (
-    <div className="flex h-full min-h-[560px] items-center justify-center border border-stone-800 bg-stone-950 text-sm text-stone-400">
-      <span className="mr-3 h-4 w-4 animate-spin border-2 border-emerald-300 border-t-transparent" />
-      Fetching occurrence records from GBIF
-    </div>
-  );
-}
-
-function Panel({ title, children }) {
-  return (
-    <section className="border border-stone-800 bg-stone-950 p-4">
-      <h2 className="mb-3 text-sm font-semibold text-stone-100">{title}</h2>
-      {children}
-    </section>
-  );
-}
-
-function MetricCard({ label, value }) {
-  return (
-    <div className="border border-stone-800 bg-neutral-950 px-3 py-2">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-500">
-        {label}
-      </div>
-      <div className="truncate text-xs font-semibold text-stone-100">
-        {value ?? "--"}
-      </div>
-    </div>
-  );
-}
-
-function RiskPill({ risk }) {
-  const className =
-    risk === "High"
-      ? "border-orange-400/50 bg-orange-500/15 text-orange-200"
-      : risk === "Medium"
-        ? "border-emerald-400/50 bg-emerald-500/15 text-emerald-200"
-        : "border-cyan-400/50 bg-cyan-500/15 text-cyan-200";
-
-  return (
-    <span className={`border px-2 py-1 text-xs font-semibold ${className}`}>
-      {risk}
-    </span>
-  );
-}
-
-function LogItem({ date, title, body }) {
-  return (
-    <div className="border border-stone-800 bg-neutral-950 p-4">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
-        {date}
-      </div>
-      <div className="mt-1 text-sm font-semibold text-stone-100">{title}</div>
-      <p className="mt-1 text-xs leading-relaxed text-stone-400">{body}</p>
-    </div>
+      <span className="block font-mono text-[9px] uppercase tracking-[0.16em] text-mist">
+        {species.category}
+      </span>
+      <span className="mt-0.5 block text-sm font-semibold text-foam">
+        {species.koreanName || species.shortName}
+      </span>
+      <span className="block truncate text-[11px] italic text-mist">{species.scientificName}</span>
+      <span className="mt-1 block font-mono text-xs text-urchin-300">
+        {loading ? "…" : count == null ? "n/a" : `${new Intl.NumberFormat("en-US").format(count)} records`}
+      </span>
+      {selected && (
+        <motion.span
+          layoutId="chip-glow"
+          className="absolute inset-x-3 -bottom-px h-0.5 rounded-full bg-gradient-to-r from-urchin-400 to-uni-400"
+        />
+      )}
+    </motion.button>
   );
 }
 
