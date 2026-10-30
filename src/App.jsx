@@ -1,35 +1,23 @@
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { MotionConfig, motion } from "motion/react";
 
 import Counter from "./components/Counter";
-import FieldLog from "./components/FieldLog";
-import MapView from "./components/MapView";
-import {
-  ActionLog,
-  EvidencePanel,
-  PhotoStrip,
-  PointPanel,
-  SpeciesDossier,
-} from "./components/Panels";
+import { ActionLog, PhotoStrip } from "./components/Panels";
+import SpotCard from "./components/SpotCard";
+import SpotMap from "./components/SpotMap";
 import UrchinMark from "./components/UrchinMark";
-import { ACTION_LOG, GROUPS, REGIONS, SPECIES, TROPICA_URL } from "./data";
-import { loadLog, normalizeEntry, saveLog, summarize } from "./fieldLog";
-import {
-  bboxForZoom,
-  densityTileUrl,
-  fetchCount,
-  fetchPhotos,
-  fetchRecordsInBox,
-  fetchSpeciesStats,
-  windowYears,
-} from "./gbif";
+import { ACTION_LOG, SPECIES, TROPICA_URL } from "./data";
+import { densityTileUrl, fetchPhotos } from "./gbif";
+import { CHECKED, RULES, SPOTS, STATUS } from "./spots";
 import { useAsync } from "./useAsync";
 
 const SPECIES_BY_ID = Object.fromEntries(SPECIES.map((species) => [species.id, species]));
+const RULE_BY_ID = Object.fromEntries(RULES.map((rule) => [rule.id, rule]));
 
-const WINDOWS = [
-  { id: "all", label: "All years" },
-  { id: "recent", label: "Last 5 years" },
+const FILTERS = [
+  { id: "all", label: "Everything" },
+  { id: "urchin", label: "Urchins" },
+  { id: "invasive", label: "Invasives" },
 ];
 
 const rise = {
@@ -38,20 +26,23 @@ const rise = {
 };
 const stagger = { hidden: {}, show: { transition: { staggerChildren: 0.07 } } };
 
-function today() {
-  const now = new Date();
-  const offset = now.getTimezoneOffset() * 60000;
-  return new Date(now - offset).toISOString().slice(0, 10);
-}
+const CHECKLIST = [
+  ["Read the official page the day you go", "Seasons, limits and emergency closures change. The rules on this site are a summary, not the law."],
+  ["Carry your licence", "Where a licence is required, it has to be on you while you harvest."],
+  ["Know the no-take zones", "Marine protected areas, parks and private or village fishing grounds can be closed even when the species is open."],
+  ["Respect the spines", "Urchin spines puncture skin and lionfish spines are venomous. Wear thick gloves and use a tool."],
+  ["Never move a live invader", "Transporting live invasive fish or crabs spreads them. Some places require you to kill them on the spot."],
+];
 
-function initialSpeciesId() {
+function initialSpotId() {
   try {
     const requested = new URLSearchParams(window.location.search).get("species");
-    if (requested && SPECIES_BY_ID[requested]) return requested;
+    const match = requested && SPOTS.find((spot) => spot.speciesId === requested);
+    if (match) return match.id;
   } catch {
-    // Fall through to the default species.
+    // Fall through to the first spot.
   }
-  return "purple-urchin";
+  return SPOTS[0].id;
 }
 
 function syncSpeciesParam(id) {
@@ -64,100 +55,43 @@ function syncSpeciesParam(id) {
   }
 }
 
-function emptyDraft(speciesId) {
-  return { date: today(), site: "", speciesId, count: "", depthM: "", lat: "", lng: "", notes: "" };
-}
-
 function App() {
-  const [speciesId, setSpeciesId] = useState(initialSpeciesId);
-  const [group, setGroup] = useState(() => SPECIES_BY_ID[speciesId].group);
-  const [regionId, setRegionId] = useState("world");
-  const [windowId, setWindowId] = useState("all");
-  const [point, setPoint] = useState(null);
-  const [placing, setPlacing] = useState(false);
-  const [entries, setEntries] = useState(loadLog);
-  const [storageOk, setStorageOk] = useState(true);
-  const [draft, setDraft] = useState(() => emptyDraft(speciesId));
+  const [spotId, setSpotId] = useState(initialSpotId);
+  const [filter, setFilter] = useState("all");
+  const [showRecords, setShowRecords] = useState(false);
   const mapRef = useRef(null);
-  const logRef = useRef(null);
 
-  const species = SPECIES_BY_ID[speciesId];
-  const region = REGIONS[regionId];
-  const country = region.country;
-  const yearRange = windowYears(windowId);
-  const isKorea = regionId === "korea";
+  const spot = SPOTS.find((item) => item.id === spotId);
+  const rule = RULE_BY_ID[spot.rule];
+  const species = SPECIES_BY_ID[spot.speciesId];
 
-  const counts = useAsync(`counts:${country || "all"}`, async (signal) => {
-    const values = await Promise.all(
-      SPECIES.map((item) => fetchCount(item.taxonKey, { country }, signal).catch(() => null))
-    );
-    return Object.fromEntries(SPECIES.map((item, index) => [item.id, values[index]]));
-  });
-
-  const stats = useAsync(`stats:${species.taxonKey}:${country || "all"}`, (signal) =>
-    fetchSpeciesStats(species.taxonKey, { country }, signal)
+  const visible = useMemo(
+    () => SPOTS.filter((item) => filter === "all" || SPECIES_BY_ID[item.speciesId].group === filter),
+    [filter]
   );
+  const statusFor = useCallback((item) => RULE_BY_ID[item.rule].status, []);
+  const counts = useMemo(() => {
+    const out = { go: 0, licence: 0, no: 0, check: 0 };
+    for (const item of SPOTS) out[statusFor(item)] += 1;
+    return out;
+  }, [statusFor]);
 
-  const photos = useAsync(`photos:${species.taxonKey}:${country || "all"}`, (signal) =>
-    fetchPhotos(species.taxonKey, { country }, signal)
-  );
+  const photos = useAsync(`photos:${species.taxonKey}`, (signal) => fetchPhotos(species.taxonKey, {}, signal));
 
-  const pointKey = point
-    ? `point:${species.taxonKey}:${windowId}:${point.lat.toFixed(4)}:${point.lng.toFixed(4)}:${point.zoom}`
-    : null;
-  const pointResult = useAsync(pointKey, (signal) =>
-    fetchRecordsInBox(species.taxonKey, point.box, { yearRange }, signal)
-  );
-
-  const tileUrl = densityTileUrl(species.taxonKey, { yearRange });
-  const groupSpecies = SPECIES.filter((item) => item.group === group);
-  const urchinTotal = SPECIES.filter((item) => item.group === "urchin").reduce(
-    (sum, item) => sum + (counts.data?.[item.id] || 0),
-    0
-  );
-  const logSummary = summarize(entries);
-  const draftPoint =
-    draft.lat !== "" && draft.lng !== "" && Number.isFinite(Number(draft.lat)) && Number.isFinite(Number(draft.lng))
-      ? { lat: Number(draft.lat), lng: Number(draft.lng) }
-      : null;
-
-  const mapEntries = useMemo(
-    () => entries.filter((entry) => Number.isFinite(entry.lat) && Number.isFinite(entry.lng)),
-    [entries]
-  );
-
-  function persist(next) {
-    setEntries(next);
-    setStorageOk(saveLog(next));
+  function selectSpot(id, scroll = false) {
+    const next = SPOTS.find((item) => item.id === id);
+    setSpotId(id);
+    syncSpeciesParam(next.speciesId);
+    if (scroll) mapRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  function selectSpecies(id) {
-    setSpeciesId(id);
-    syncSpeciesParam(id);
-    setPoint(null);
-    setDraft((current) => (current.site || current.lat ? current : { ...current, speciesId: id }));
-  }
-
-  function selectGroup(id) {
-    setGroup(id);
-    const first = SPECIES.find((item) => item.group === id);
-    if (first && SPECIES_BY_ID[speciesId].group !== id) selectSpecies(first.id);
-  }
-
-  function handleMapClick({ lat, lng, zoom }) {
-    if (placing) {
-      setDraft((current) => ({ ...current, lat: lat.toFixed(5), lng: lng.toFixed(5) }));
-      setPlacing(false);
-      logRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      return;
+  function changeFilter(id) {
+    setFilter(id);
+    const current = SPECIES_BY_ID[spot.speciesId].group;
+    if (id !== "all" && current !== id) {
+      const first = SPOTS.find((item) => SPECIES_BY_ID[item.speciesId].group === id);
+      if (first) selectSpot(first.id);
     }
-    setPoint({ lat, lng, zoom, box: bboxForZoom(lat, lng, zoom) });
-  }
-
-  function togglePlace() {
-    const next = !placing;
-    setPlacing(next);
-    if (next) mapRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   return (
@@ -166,16 +100,11 @@ function App() {
         <div className="pointer-events-none absolute inset-x-0 top-0 h-[520px] bg-[radial-gradient(ellipse_at_top_left,rgba(124,58,237,0.28),transparent_60%),radial-gradient(ellipse_at_top_right,rgba(255,154,46,0.12),transparent_55%)]" />
 
         <header className="relative">
-          <motion.div
-            className="mx-auto max-w-7xl px-4 pb-8 pt-6 sm:px-6"
-            variants={stagger}
-            initial="hidden"
-            animate="show"
-          >
+          <motion.div className="mx-auto max-w-7xl px-4 pb-8 pt-6 sm:px-6" variants={stagger} initial="hidden" animate="show">
             <motion.nav variants={rise} className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.22em] text-mist">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-kelp-400" />
-                Student citizen science · live GBIF data
+              <div className="flex items-center gap-2.5">
+                <UrchinMark className="h-8 w-8" />
+                <span className="font-display text-lg font-semibold">Urchin Tracker</span>
               </div>
               <a
                 href={TROPICA_URL}
@@ -188,186 +117,150 @@ function App() {
               </a>
             </motion.nav>
 
-            <div className="mt-8 grid items-end gap-8 lg:grid-cols-[1.3fr_1fr]">
+            <div className="mt-10 grid items-end gap-8 lg:grid-cols-[1.4fr_1fr]">
               <div>
-                <motion.div variants={rise} className="flex items-center gap-4">
-                  <UrchinMark className="h-16 w-16 shrink-0 sm:h-20 sm:w-20" />
-                  <h1 className="font-display text-4xl font-bold leading-[0.95] tracking-tight sm:text-6xl">
-                    Urchin
-                    <br />
-                    <span className="text-uni-400">Tracker</span>
-                  </h1>
-                </motion.div>
-                <motion.p variants={rise} className="mt-5 max-w-xl text-base leading-relaxed text-foam/80 sm:text-lg">
-                  Where sea urchins pile up, kelp and seaweed forests can turn into
-                  bare rock. This map pulls every public GBIF record for the urchins
-                  behind those barrens, from California to Korea's East Sea, and
-                  lets you log what you see on your own dives.
+                <motion.h1 variants={rise} className="font-display text-5xl font-bold leading-[0.92] tracking-tight sm:text-7xl">
+                  Find the bloom.
+                  <br />
+                  Check the rules.
+                  <br />
+                  <span className="text-uni-400">Go get 'em.</span>
+                </motion.h1>
+                <motion.p variants={rise} className="mt-6 max-w-xl text-base leading-relaxed text-foam/80 sm:text-lg">
+                  Urchin barrens and invasive hotspots, each with the rules for taking them: licence,
+                  limits, gear and the places that are off-limits. Pick a spot, read the rules, then
+                  cook what you bring home.
                 </motion.p>
               </div>
 
               <motion.dl variants={stagger} className="grid grid-cols-2 gap-2.5">
-                <HeroStat label={`GBIF urchin records · ${region.label}`} loading={counts.loading}>
-                  <Counter value={urchinTotal} />
-                </HeroStat>
-                <HeroStat label="Urchin species tracked">
-                  <Counter value={SPECIES.filter((item) => item.group === "urchin").length} />
-                </HeroStat>
-                <HeroStat label="Your logged sightings">
-                  <Counter value={logSummary.sightings} />
-                </HeroStat>
-                <HeroStat label="Your logged sites">
-                  <Counter value={logSummary.sites} />
-                </HeroStat>
+                {Object.entries(STATUS).map(([key, s]) => (
+                  <motion.div key={key} variants={rise} className="rounded-2xl border border-ink-700/80 bg-ink-900/70 px-4 py-3 backdrop-blur">
+                    <dt className="flex items-center gap-1.5 font-mono text-[10px] uppercase leading-tight tracking-[0.14em] text-mist">
+                      <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
+                      {s.label}
+                    </dt>
+                    <dd className={`mt-1 font-display text-3xl font-semibold ${s.text}`}>
+                      <Counter value={counts[key]} />
+                    </dd>
+                  </motion.div>
+                ))}
               </motion.dl>
             </div>
           </motion.div>
         </header>
 
         <main className="relative mx-auto max-w-7xl space-y-5 px-4 pb-16 sm:px-6">
-          <motion.section
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.25, duration: 0.5 }}
-            className="rounded-2xl border border-ink-700/70 bg-ink-900/70 p-3 backdrop-blur sm:p-4"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <Segmented
-                options={GROUPS}
-                value={group}
-                onChange={selectGroup}
-                ariaLabel="Species group"
+          <div ref={mapRef} className="grid scroll-mt-4 gap-5 lg:grid-cols-[minmax(0,1fr)_400px]">
+            <section className="relative h-[460px] overflow-hidden rounded-2xl border border-ink-700/70 bg-ink-900 sm:h-[640px]">
+              <SpotMap
+                spots={visible}
+                selectedId={spotId}
+                statusFor={statusFor}
+                densityUrl={showRecords ? densityTileUrl(species.taxonKey, {}) : null}
+                onSelect={(id) => selectSpot(id)}
               />
-              <Segmented
-                options={Object.values(REGIONS)}
-                value={regionId}
-                onChange={(id) => {
-                  setRegionId(id);
-                  setPoint(null);
-                }}
-                ariaLabel="Region"
-              />
-            </div>
-            <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
-              {groupSpecies.map((item) => (
-                <SpeciesChip
-                  key={item.id}
-                  species={item}
-                  count={counts.data?.[item.id]}
-                  loading={counts.loading}
-                  selected={item.id === speciesId}
-                  onSelect={() => selectSpecies(item.id)}
-                />
-              ))}
-            </div>
-          </motion.section>
-
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
-            <div className="min-w-0 space-y-5">
-              <section
-                ref={mapRef}
-                className="relative h-[460px] overflow-hidden rounded-2xl border border-ink-700/70 bg-ink-900 sm:h-[600px]"
-              >
-                <MapView
-                  tileUrl={tileUrl}
-                  regionId={regionId}
-                  mode={placing ? "place" : "inspect"}
-                  box={point?.box}
-                  fieldEntries={mapEntries}
-                  draftPoint={draftPoint}
-                  speciesById={SPECIES_BY_ID}
-                  onMapClick={handleMapClick}
-                />
-                <div className="pointer-events-none absolute left-3 right-3 top-3 z-[500] flex flex-wrap items-start justify-between gap-2">
-                  <div className="pointer-events-auto rounded-xl border border-ink-700 bg-ink-950/85 px-3 py-2 backdrop-blur">
-                    <p className="font-display text-sm font-semibold">
-                      {species.commonName}
-                      {species.koreanName && (
-                        <span className="ml-1.5 text-urchin-300">{species.koreanName}</span>
-                      )}
-                    </p>
-                    <p className="text-[11px] text-mist">
-                      {placing ? "Click the map to place your sighting" : "Tap the map to inspect records"}
-                    </p>
-                  </div>
-                  <div className="pointer-events-auto">
-                    <Segmented options={WINDOWS} value={windowId} onChange={setWindowId} ariaLabel="Time window" small />
-                  </div>
+              <div className="pointer-events-none absolute left-3 right-3 top-3 z-[500] flex flex-wrap items-start justify-between gap-2">
+                <div className="pointer-events-auto">
+                  <Segmented options={FILTERS} value={filter} onChange={changeFilter} ariaLabel="Show" />
                 </div>
-                <div className="pointer-events-none absolute bottom-12 left-3 z-[500] sm:bottom-8 rounded-xl border border-ink-700 bg-ink-950/85 px-3 py-2 text-[11px] text-mist backdrop-blur">
-                  <div className="mb-1 flex items-center gap-2">
-                    <span>fewer</span>
-                    <span className="h-2 w-24 rounded-full bg-gradient-to-r from-[#ffff00] via-[#ff9900] to-[#ff2200]" />
-                    <span>more records</span>
+                <button
+                  type="button"
+                  onClick={() => setShowRecords((v) => !v)}
+                  aria-pressed={showRecords}
+                  className={`pointer-events-auto rounded-full border px-3 py-1.5 text-xs font-medium backdrop-blur transition ${
+                    showRecords ? "border-uni-400 bg-uni-500/20 text-uni-300" : "border-ink-700 bg-ink-950/80 text-mist hover:text-foam"
+                  }`}
+                >
+                  {showRecords ? "Hide" : "Show"} GBIF records for {species.shortName}
+                </button>
+              </div>
+              <div className="pointer-events-none absolute bottom-8 left-3 z-[500] space-y-1 rounded-xl border border-ink-700 bg-ink-950/85 px-3 py-2 text-[11px] text-mist backdrop-blur">
+                {Object.entries(STATUS).map(([key, s]) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <span className={`h-2.5 w-2.5 rounded-full ${s.dot}`} />
+                    {s.label}
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-2.5 w-2.5 rounded-full border-2 border-white bg-kelp-400" />
-                    your sightings
-                  </div>
-                </div>
-              </section>
+                ))}
+              </div>
+            </section>
 
-              <PhotoStrip
-                photos={photos.data}
-                loading={photos.loading}
-                error={photos.error}
-                species={species}
-              />
-            </div>
-
-            <aside className="min-w-0 space-y-5">
-              <SpeciesDossier species={species} />
-              <PointPanel
-                point={point}
-                result={pointResult.data}
-                loading={pointResult.loading}
-                error={pointResult.error}
-                species={species}
-                onClear={() => setPoint(null)}
-              />
-              <EvidencePanel
-                stats={stats.data}
-                loading={stats.loading}
-                error={stats.error}
-                regionLabel={region.label}
-                isKorea={isKorea}
-              />
+            <aside className="min-w-0 lg:sticky lg:top-4 lg:self-start">
+              <SpotCard spot={spot} rule={rule} species={species} />
             </aside>
           </div>
 
-          <div ref={logRef} className="scroll-mt-4">
-            <FieldLog
-              entries={entries}
-              draft={draft}
-              onDraftChange={setDraft}
-              onSubmit={() => {
-                persist([...entries, normalizeEntry(draft)]);
-                setDraft(emptyDraft(draft.speciesId));
-              }}
-              onDelete={(id) => persist(entries.filter((entry) => entry.id !== id))}
-              onImport={(imported) => persist([...entries, ...imported])}
-              species={SPECIES}
-              speciesById={SPECIES_BY_ID}
-              placing={placing}
-              onTogglePlace={togglePlace}
-              storageOk={storageOk}
-            />
-          </div>
+          <section>
+            <div className="mb-3 flex items-end justify-between gap-3">
+              <h2 className="font-display text-2xl font-semibold">All spots</h2>
+              <p className="text-xs text-mist">{visible.length} shown</p>
+            </div>
+            <motion.ul layout className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+              {visible.map((item) => {
+                const r = RULE_BY_ID[item.rule];
+                const sp = SPECIES_BY_ID[item.speciesId];
+                const active = item.id === spotId;
+                return (
+                  <motion.li layout key={item.id}>
+                    <button
+                      type="button"
+                      onClick={() => selectSpot(item.id, true)}
+                      aria-pressed={active}
+                      className={`group h-full w-full rounded-xl border p-3.5 text-left transition-colors ${
+                        active ? "border-urchin-400 bg-urchin-500/10" : "border-ink-700 bg-ink-900/60 hover:border-ink-600"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-mist">{r.place}</span>
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS[r.status].dot}`} aria-label={STATUS[r.status].label} />
+                      </div>
+                      <p className="mt-1 font-display text-lg font-semibold leading-tight">{item.name}</p>
+                      <p className="mt-0.5 text-xs text-foam/70">
+                        {sp.koreanName || sp.commonName}
+                      </p>
+                      <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-mist">{r.headline}</p>
+                    </button>
+                  </motion.li>
+                );
+              })}
+            </motion.ul>
+          </section>
+
+          <PhotoStrip photos={photos.data} loading={photos.loading} error={photos.error} species={species} />
+
+          <section className="rounded-2xl border border-ink-700/70 bg-ink-900/70 p-5">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-uni-300">Before you go</p>
+                <h2 className="mt-1 font-display text-2xl font-semibold">Five things, every time</h2>
+              </div>
+            </div>
+            <ol className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              {CHECKLIST.map(([title, text], i) => (
+                <motion.li
+                  key={title}
+                  initial={{ opacity: 0, y: 14 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true, amount: 0.4 }}
+                  transition={{ duration: 0.45, delay: i * 0.06 }}
+                  className="rounded-xl border border-ink-700/70 bg-ink-950/50 p-3.5"
+                >
+                  <span className="font-mono text-xs text-uni-300">0{i + 1}</span>
+                  <p className="mt-1 text-sm font-semibold leading-snug">{title}</p>
+                  <p className="mt-1.5 text-xs leading-relaxed text-mist">{text}</p>
+                </motion.li>
+              ))}
+            </ol>
+          </section>
 
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <ActionLog entries={ACTION_LOG} />
             <section className="flex flex-col justify-between overflow-hidden rounded-2xl border border-uni-500/40 bg-gradient-to-br from-uni-500/20 via-ink-900 to-urchin-600/20 p-5">
               <div>
-                <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-uni-300">
-                  From map to plate
-                </p>
-                <h2 className="mt-1 font-display text-3xl font-semibold leading-tight">
-                  Every species here has a recipe in TROPICA.
-                </h2>
+                <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-uni-300">From the water to the plate</p>
+                <h2 className="mt-1 font-display text-3xl font-semibold leading-tight">Got your limit? Now cook it.</h2>
                 <p className="mt-3 text-sm leading-relaxed text-foam/80">
-                  The tracker shows where the pressure is. TROPICA is the cookbook
-                  that turns overabundant urchins and invasive fish into dinner,
-                  with sourcing and safety notes for each dish.
+                  Every species on this map has recipes in TROPICA, from uni toast to lionfish tacos,
+                  with notes on cleaning and safety.
                 </p>
               </div>
               <a
@@ -380,14 +273,14 @@ function App() {
                 <span className="transition-transform group-hover:translate-x-1">→</span>
               </a>
             </section>
+            <ActionLog entries={ACTION_LOG} />
           </div>
 
           <footer className="border-t border-ink-700 pt-5 text-xs leading-relaxed text-mist">
-            This is a public-data prototype, not an official monitoring system.
-            GBIF records can include sampling bias, duplicate survey effort, and
-            uneven regional coverage. Always follow local harvest, transport,
-            possession, and fish/shellfish consumption rules. Occurrence data and
-            density tiles from{" "}
+            Rules on this site are short summaries of official pages, checked {CHECKED}. They are not
+            legal advice and can change at any time; the linked official page always wins. Hotspots
+            mark documented urchin barrens and invasive populations, not guaranteed catches. Optional
+            occurrence layer from{" "}
             <a className="text-urchin-300 hover:underline" href="https://www.gbif.org" target="_blank" rel="noreferrer">
               GBIF.org
             </a>
@@ -399,27 +292,9 @@ function App() {
   );
 }
 
-function HeroStat({ label, loading, children }) {
+function Segmented({ options, value, onChange, ariaLabel }) {
   return (
-    <motion.div
-      variants={rise}
-      className="rounded-2xl border border-ink-700/80 bg-ink-900/70 px-4 py-3 backdrop-blur"
-    >
-      <dt className="font-mono text-[10px] uppercase leading-tight tracking-[0.16em] text-mist">{label}</dt>
-      <dd className={`mt-1 font-display text-2xl font-semibold sm:text-3xl ${loading ? "animate-pulse opacity-60" : ""}`}>
-        {children}
-      </dd>
-    </motion.div>
-  );
-}
-
-function Segmented({ options, value, onChange, ariaLabel, small = false }) {
-  return (
-    <div
-      role="radiogroup"
-      aria-label={ariaLabel}
-      className="relative inline-flex rounded-full border border-ink-700 bg-ink-950/80 p-1 backdrop-blur"
-    >
+    <div role="radiogroup" aria-label={ariaLabel} className="relative inline-flex rounded-full border border-ink-700 bg-ink-950/85 p-1 backdrop-blur">
       {options.map((option) => {
         const active = option.id === value;
         return (
@@ -429,9 +304,9 @@ function Segmented({ options, value, onChange, ariaLabel, small = false }) {
             role="radio"
             aria-checked={active}
             onClick={() => onChange(option.id)}
-            className={`relative rounded-full font-medium transition-colors ${
-              small ? "px-2.5 py-1 text-[11px]" : "px-3.5 py-1.5 text-xs sm:text-sm"
-            } ${active ? "text-ink-950" : "text-mist hover:text-foam"}`}
+            className={`relative rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors sm:text-sm ${
+              active ? "text-ink-950" : "text-mist hover:text-foam"
+            }`}
           >
             {active && (
               <motion.span
@@ -445,39 +320,6 @@ function Segmented({ options, value, onChange, ariaLabel, small = false }) {
         );
       })}
     </div>
-  );
-}
-
-function SpeciesChip({ species, count, loading, selected, onSelect }) {
-  return (
-    <motion.button
-      type="button"
-      onClick={onSelect}
-      whileTap={{ scale: 0.97 }}
-      aria-pressed={selected}
-      className={`relative min-w-[170px] shrink-0 rounded-xl border px-3 py-2.5 text-left transition-colors ${
-        selected
-          ? "border-urchin-400 bg-urchin-500/15"
-          : "border-ink-700 bg-ink-950/50 hover:border-ink-600"
-      }`}
-    >
-      <span className="block font-mono text-[9px] uppercase tracking-[0.16em] text-mist">
-        {species.category}
-      </span>
-      <span className="mt-0.5 block text-sm font-semibold text-foam">
-        {species.koreanName || species.shortName}
-      </span>
-      <span className="block truncate text-[11px] italic text-mist">{species.scientificName}</span>
-      <span className="mt-1 block font-mono text-xs text-urchin-300">
-        {loading ? "…" : count == null ? "n/a" : `${new Intl.NumberFormat("en-US").format(count)} records`}
-      </span>
-      {selected && (
-        <motion.span
-          layoutId="chip-glow"
-          className="absolute inset-x-3 -bottom-px h-0.5 rounded-full bg-gradient-to-r from-urchin-400 to-uni-400"
-        />
-      )}
-    </motion.button>
   );
 }
 
