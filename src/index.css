@@ -47,7 +47,7 @@ body {
 /* Leaflet, dark theme */
 .leaflet-container {
   background: #081120;
-  font-family: Inter, system-ui, sans-serif;
+  font-family: "Instrument Sans", system-ui, sans-serif;
   cursor: crosshair;
 }
 .map-placing.leaflet-container,
